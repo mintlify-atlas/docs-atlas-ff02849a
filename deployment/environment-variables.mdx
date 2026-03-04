@@ -1,0 +1,448 @@
+---
+title: Environment Variables
+description: Complete reference for all environment variables used by LLM Gateway
+---
+
+## Overview
+
+LLM Gateway uses environment variables for provider API keys, server configuration, and logging. Create a `.env` file in your project root based on `.env.example`.
+
+## Quick Start
+
+```bash
+cp .env.example .env
+```
+
+Edit the `.env` file with your configuration:
+
+```bash
+# Required: At least one provider API key
+OPENROUTER_API_KEY=your_key_here
+ZEN_API_KEY=your_key_here
+
+# Optional: Server configuration
+DEFAULT_MODEL=glm-4.7
+PORT=4000
+LOG_LEVEL=I
+
+# Optional: Development configuration
+VITE_PORT=4001
+VITE_BACKEND_URL=http://localhost:4000
+```
+
+## Provider API Keys
+
+### OPENROUTER_API_KEY
+
+<ParamField path="OPENROUTER_API_KEY" type="string" required={false}>
+  API key for OpenRouter provider access.
+  
+  **Required when**: Using OpenRouter harness
+  
+  **Obtain from**: [openrouter.ai](https://openrouter.ai)
+  
+  ```bash
+  OPENROUTER_API_KEY=sk-or-v1-...
+  ```
+</ParamField>
+
+### ZEN_API_KEY
+
+<ParamField path="ZEN_API_KEY" type="string" required={false}>
+  API key for Zen provider access.
+  
+  **Required when**: Using Zen harness (default)
+  
+  **Obtain from**: Your Zen API provider
+  
+  ```bash
+  ZEN_API_KEY=zen_...
+  ```
+</ParamField>
+
+### ANTHROPIC_API_KEY
+
+<ParamField path="ANTHROPIC_API_KEY" type="string" required={false}>
+  API key for Anthropic Claude models.
+  
+  **Required when**: Using Anthropic harness
+  
+  **Obtain from**: [console.anthropic.com](https://console.anthropic.com)
+  
+  ```bash
+  ANTHROPIC_API_KEY=sk-ant-...
+  ```
+  
+  <Note>
+  Not in `.env.example` but supported by the Anthropic harness.
+  </Note>
+</ParamField>
+
+### OPENAI_API_KEY
+
+<ParamField path="OPENAI_API_KEY" type="string" required={false}>
+  API key for OpenAI models.
+  
+  **Required when**: Using OpenAI harness
+  
+  **Obtain from**: [platform.openai.com](https://platform.openai.com)
+  
+  ```bash
+  OPENAI_API_KEY=sk-...
+  ```
+  
+  <Note>
+  Not in `.env.example` but supported by the OpenAI harness.
+  </Note>
+</ParamField>
+
+<Warning>
+You must configure at least one provider API key for the server to function.
+</Warning>
+
+## Server Configuration
+
+### DEFAULT_MODEL
+
+<ParamField path="DEFAULT_MODEL" type="string" default="undefined" required={false}>
+  Default model identifier used when clients don't specify a model in requests.
+  
+  **Examples**:
+  - `glm-4.7` - Zen model
+  - `kimi-k2.5` - Kimi model for long context
+  - `claude-3-5-sonnet-20241022` - Anthropic model
+  - `gpt-4o` - OpenAI model
+  
+  ```bash
+  DEFAULT_MODEL=glm-4.7
+  ```
+  
+  The model must be supported by your configured provider. Validate available models via the `/models` endpoint.
+</ParamField>
+
+### PORT
+
+<ParamField path="PORT" type="number" default="4000" required={false}>
+  Port number for the HTTP server to listen on.
+  
+  ```bash
+  PORT=4000
+  ```
+  
+  **Common values**:
+  - `4000` - Default development port
+  - `3000` - Alternative development port
+  - `8080` - Common production port
+  - `80` - HTTP (requires elevated permissions)
+  - `443` - HTTPS (requires SSL setup)
+</ParamField>
+
+### LOG_LEVEL
+
+<ParamField path="LOG_LEVEL" type="string" default="I" required={false}>
+  Controls logging verbosity for the server.
+  
+  **Allowed values**:
+  
+  | Value | Level | Description |
+  |-------|-------|-------------|
+  | `D` | Debug | Verbose debugging information |
+  | `I` | Info | General informational messages (default) |
+  | `W` | Warn | Warning messages only |
+  | `E` | Error | Error messages only |
+  
+  ```bash
+  LOG_LEVEL=I
+  ```
+  
+  **Example output**:
+  ```
+  I abc123 req_start model=glm-4.7
+  I abc123 req_end dur=2341ms
+  ```
+</ParamField>
+
+## Development Configuration
+
+These variables are used by the development environment and client applications.
+
+### VITE_PORT
+
+<ParamField path="VITE_PORT" type="number" default="4001" required={false}>
+  Port number for the Vite development server (web client).
+  
+  ```bash
+  VITE_PORT=4001
+  ```
+  
+  **Usage**:
+  ```bash
+  bun run dev:web  # Starts Vite on this port
+  ```
+  
+  Must be different from `PORT` to avoid conflicts.
+</ParamField>
+
+### VITE_BACKEND_URL
+
+<ParamField path="VITE_BACKEND_URL" type="string" default="http://localhost:4000" required={false}>
+  URL of the LLM Gateway backend server for client connections.
+  
+  ```bash
+  VITE_BACKEND_URL=http://localhost:4000
+  ```
+  
+  **Examples**:
+  - `http://localhost:4000` - Local development
+  - `http://192.168.1.100:4000` - LAN development
+  - `https://api.yourdomain.com` - Production
+  
+  The web client uses this URL to establish SSE connections for chat streaming.
+</ParamField>
+
+## Environment-Specific Configurations
+
+<Tabs>
+  <Tab title="Development">
+    ```bash
+    # .env.development
+    ZEN_API_KEY=your_dev_key
+    DEFAULT_MODEL=glm-4.7
+    PORT=4000
+    LOG_LEVEL=D  # Debug logging
+    VITE_PORT=4001
+    VITE_BACKEND_URL=http://localhost:4000
+    ```
+  </Tab>
+  
+  <Tab title="Staging">
+    ```bash
+    # .env.staging
+    ZEN_API_KEY=your_staging_key
+    DEFAULT_MODEL=glm-4.7
+    PORT=4000
+    LOG_LEVEL=I  # Info logging
+    VITE_BACKEND_URL=https://staging-api.yourdomain.com
+    ```
+  </Tab>
+  
+  <Tab title="Production">
+    ```bash
+    # .env.production
+    ZEN_API_KEY=your_prod_key
+    OPENROUTER_API_KEY=your_prod_key
+    DEFAULT_MODEL=glm-4.7
+    PORT=4000
+    LOG_LEVEL=W  # Warn logging only
+    VITE_BACKEND_URL=https://api.yourdomain.com
+    ```
+  </Tab>
+</Tabs>
+
+## Loading Environment Variables
+
+### Bun Automatic Loading
+
+Bun automatically loads `.env` files:
+
+```bash
+bun run server/index.ts  # Loads .env automatically
+```
+
+### Explicit Environment File
+
+Specify a different environment file:
+
+```bash
+bun --env-file=.env.production run server/index.ts
+```
+
+### CLI Development
+
+The CLI client requires explicit environment file loading:
+
+```bash
+cd clients/cli
+bun --env-file=../../.env run index.tsx
+```
+
+## Security Best Practices
+
+<Steps>
+  <Step title="Never Commit API Keys">
+    Add `.env` to `.gitignore` to prevent committing secrets:
+    
+    ```gitignore
+    .env
+    .env.local
+    .env.*.local
+    ```
+  </Step>
+  
+  <Step title="Use Different Keys Per Environment">
+    Maintain separate API keys for development, staging, and production.
+  </Step>
+  
+  <Step title="Rotate Keys Regularly">
+    Periodically rotate API keys and update environment variables.
+  </Step>
+  
+  <Step title="Restrict Key Permissions">
+    Use provider-specific settings to limit key capabilities and spending.
+  </Step>
+  
+  <Step title="Use Secret Management in Production">
+    Consider using secret management services:
+    - AWS Secrets Manager
+    - HashiCorp Vault
+    - Azure Key Vault
+    - Google Cloud Secret Manager
+  </Step>
+</Steps>
+
+<Warning>
+Never include actual API keys in documentation, code examples, or public repositories.
+</Warning>
+
+## Validation
+
+Validate your environment configuration:
+
+```bash
+# Check if required variables are set
+if [ -z "$ZEN_API_KEY" ] && [ -z "$OPENROUTER_API_KEY" ]; then
+  echo "Error: At least one provider API key must be set"
+  exit 1
+fi
+
+# Test server startup
+bun run server/index.ts
+
+# Test model availability
+curl http://localhost:4000/models
+```
+
+## Docker Configuration
+
+When using Docker, pass environment variables via:
+
+### docker-compose.yml
+
+```yaml
+version: '3.8'
+services:
+  llm-gateway:
+    build: .
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    # Or explicit environment:
+    environment:
+      - ZEN_API_KEY=${ZEN_API_KEY}
+      - DEFAULT_MODEL=glm-4.7
+      - PORT=4000
+      - LOG_LEVEL=I
+```
+
+### Docker Run
+
+```bash
+docker run \
+  -p 4000:4000 \
+  -e ZEN_API_KEY="$ZEN_API_KEY" \
+  -e DEFAULT_MODEL=glm-4.7 \
+  -e LOG_LEVEL=I \
+  llm-gateway
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server fails to start with auth errors">
+    **Problem**: API key not found or invalid
+    
+    **Solutions**:
+    - Verify `.env` file exists in project root
+    - Check API key is uncommented and has no spaces
+    - Validate key with provider's API directly
+    - Ensure correct provider harness is configured
+  </Accordion>
+  
+  <Accordion title="Wrong model being used">
+    **Problem**: Requests use unexpected model
+    
+    **Solutions**:
+    - Verify `DEFAULT_MODEL` is set correctly
+    - Confirm model is supported: `curl http://localhost:4000/models`
+    - Check client requests include explicit model parameter
+    - Review server logs for model validation errors
+  </Accordion>
+  
+  <Accordion title="Port already in use">
+    **Problem**: `Error: listen EADDRINUSE: address already in use`
+    
+    **Solutions**:
+    - Change `PORT` to an unused port
+    - Kill existing process: `lsof -ti:4000 | xargs kill`
+    - Check for other services using the port
+  </Accordion>
+  
+  <Accordion title="Environment variables not loading">
+    **Problem**: Variables appear undefined at runtime
+    
+    **Solutions**:
+    - Verify `.env` file is in the correct directory
+    - Check file has no syntax errors (no quotes around values)
+    - Use `--env-file` flag explicitly if not in project root
+    - Confirm Bun version supports automatic .env loading
+  </Accordion>
+</AccordionGroup>
+
+## Reference
+
+### Complete .env.example
+
+```bash
+# Provider API Keys (at least one required)
+OPENROUTER_API_KEY=
+ZEN_API_KEY=
+
+# Server Configuration
+DEFAULT_MODEL=
+LOG_LEVEL=I
+
+# Network Configuration
+PORT=4000
+VITE_PORT=4001
+VITE_BACKEND_URL=http://localhost:4000
+```
+
+### All Available Variables
+
+| Variable | Type | Default | Required | Description |
+|----------|------|---------|----------|-------------|
+| `OPENROUTER_API_KEY` | string | - | Conditional | OpenRouter API key |
+| `ZEN_API_KEY` | string | - | Conditional | Zen API key |
+| `ANTHROPIC_API_KEY` | string | - | Conditional | Anthropic API key |
+| `OPENAI_API_KEY` | string | - | Conditional | OpenAI API key |
+| `DEFAULT_MODEL` | string | - | No | Default model for requests |
+| `PORT` | number | 4000 | No | Server port |
+| `LOG_LEVEL` | string | I | No | Logging verbosity (D/I/W/E) |
+| `VITE_PORT` | number | 4001 | No | Vite dev server port |
+| `VITE_BACKEND_URL` | string | http://localhost:4000 | No | Backend URL for clients |
+
+<Info>
+At least one provider API key (`OPENROUTER_API_KEY`, `ZEN_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`) is required.
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Server Setup" icon="server" href="/deployment/server-setup">
+    Learn how to set up and run the server
+  </Card>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Advanced configuration options
+  </Card>
+</CardGroup>

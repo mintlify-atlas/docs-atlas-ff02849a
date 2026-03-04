@@ -1,0 +1,399 @@
+---
+title: "Async Primitives"
+description: "Async coordination primitives for inter-coroutine communication"
+---
+
+## Overview
+
+The LLM Gateway provides three async primitives for coordinating between coroutines: `Deferred` for external promise resolution, `AsyncQueue` for FIFO signaling, and `Passthrough` for bridging imperative producers with async iteration consumers.
+
+## Deferred
+
+A deferred promise that can be resolved or rejected externally. Useful for inter-coroutine communication where one coroutine needs to wait for a signal from another.
+
+### Interface
+
+```typescript
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+}
+```
+
+<ResponseField name="promise" type="Promise<T>" required>
+  The promise that will be resolved or rejected
+</ResponseField>
+
+<ResponseField name="resolve" type="function" required>
+  Resolve the promise with a value
+</ResponseField>
+
+<ResponseField name="reject" type="function" required>
+  Reject the promise with an error
+</ResponseField>
+
+### Usage
+
+```typescript
+import { deferred } from "@llm-gateway/ai/primitives";
+
+const d = deferred<string>();
+
+// In one coroutine - wait for signal
+async function waiter() {
+  const result = await d.promise;
+  console.log("Received:", result);
+}
+
+// In another coroutine - send signal
+function signaler() {
+  d.resolve("done");
+}
+
+waiter();
+setTimeout(() => signaler(), 1000);
+```
+
+### API Reference
+
+#### deferred\<T\>()
+
+Create a deferred promise with external resolve/reject controls.
+
+```typescript
+function deferred<T>(): Deferred<T>
+```
+
+**Returns:** A `Deferred` object with `promise`, `resolve`, and `reject` properties.
+
+**Example:**
+
+```typescript
+const d = deferred<number>();
+
+// Wait for resolution
+d.promise.then(value => console.log(value));
+
+// Resolve later
+d.resolve(42);
+```
+
+## AsyncQueue
+
+An async queue for inter-coroutine signaling. Provides a FIFO queue where `pop()` returns a promise that resolves when an item is available. This enables producer/consumer patterns between async generators.
+
+### Class Definition
+
+```typescript
+class AsyncQueue<T> {
+  push(value: T): void;
+  pop(): Promise<T>;
+  get length(): number;
+}
+```
+
+### Usage
+
+```typescript
+import { AsyncQueue } from "@llm-gateway/ai/primitives";
+
+const queue = new AsyncQueue<number>();
+
+// Consumer (waits for items)
+async function consumer() {
+  while (true) {
+    const item = await queue.pop();
+    console.log("Got:", item);
+    if (item === 0) break;
+  }
+}
+
+// Producer (pushes items)
+function producer() {
+  queue.push(1);
+  queue.push(2);
+  queue.push(3);
+  queue.push(0); // sentinel
+}
+
+consumer();
+setTimeout(() => producer(), 100);
+```
+
+### API Reference
+
+#### constructor()
+
+Create a new async queue.
+
+```typescript
+const queue = new AsyncQueue<T>();
+```
+
+#### push(value)
+
+Push an item to the queue. If there are waiting consumers, the first one receives the value immediately. Otherwise, the value is queued.
+
+```typescript
+queue.push(value: T): void
+```
+
+**Parameters:**
+
+<ResponseField name="value" type="T" required>
+  The value to push to the queue
+</ResponseField>
+
+**Example:**
+
+```typescript
+const queue = new AsyncQueue<string>();
+queue.push("hello");
+queue.push("world");
+```
+
+#### pop()
+
+Pop an item from the queue. Returns immediately if items are queued. Otherwise, returns a promise that resolves when an item is pushed.
+
+```typescript
+queue.pop(): Promise<T>
+```
+
+**Returns:** A promise that resolves to the next item in the queue.
+
+**Example:**
+
+```typescript
+const queue = new AsyncQueue<string>();
+
+// This will wait until something is pushed
+const item = await queue.pop();
+console.log(item);
+
+// In another coroutine
+queue.push("hello");
+```
+
+#### length
+
+The number of items currently queued. Note: This does not include waiting consumers.
+
+```typescript
+queue.length: number
+```
+
+**Example:**
+
+```typescript
+const queue = new AsyncQueue<number>();
+queue.push(1);
+queue.push(2);
+console.log(queue.length); // 2
+
+await queue.pop();
+console.log(queue.length); // 1
+```
+
+## Passthrough
+
+A push-based async iterable for bridging imperative producers with async iteration consumers. The orchestrator uses this to feed subagent events into the multiplexer: it registers the passthrough's `iterable` with the multiplexer, then pushes events from the subagent's generator.
+
+### Interface
+
+```typescript
+interface Passthrough<T> {
+  push(value: T): void;
+  end(): void;
+  iterable: AsyncIterable<T>;
+}
+```
+
+<ResponseField name="push" type="function" required>
+  Push a value into the iterable
+</ResponseField>
+
+<ResponseField name="end" type="function" required>
+  Signal that no more values will be pushed
+</ResponseField>
+
+<ResponseField name="iterable" type="AsyncIterable<T>" required>
+  The async iterable that yields pushed values
+</ResponseField>
+
+### Usage
+
+```typescript
+import { createPassthrough } from "@llm-gateway/ai/primitives";
+
+const pt = createPassthrough<number>();
+
+// Consumer (iterates values as they arrive)
+async function consume() {
+  for await (const v of pt.iterable) {
+    console.log(v);
+  }
+  console.log("done");
+}
+
+// Producer (pushes values imperatively)
+function produce() {
+  pt.push(1);
+  pt.push(2);
+  pt.push(3);
+  pt.end();
+}
+
+consume();
+setTimeout(() => produce(), 100);
+```
+
+### API Reference
+
+#### createPassthrough\<T\>()
+
+Create a passthrough — an async iterable backed by a push/end interface. Values pushed before the consumer calls `next()` are buffered. When the buffer is empty, the consumer waits until the next `push()` or `end()`.
+
+```typescript
+function createPassthrough<T>(): Passthrough<T>
+```
+
+**Returns:** A `Passthrough` object with `push`, `end`, and `iterable` properties.
+
+**Example:**
+
+```typescript
+const pt = createPassthrough<string>();
+
+// Start consuming
+async function consumer() {
+  for await (const msg of pt.iterable) {
+    console.log("Received:", msg);
+  }
+}
+
+consumer();
+
+// Push values
+pt.push("hello");
+pt.push("world");
+pt.end();
+```
+
+#### push(value)
+
+Push a value into the iterable. The value is either delivered immediately to a waiting consumer or buffered until the consumer is ready.
+
+```typescript
+pt.push(value: T): void
+```
+
+**Parameters:**
+
+<ResponseField name="value" type="T" required>
+  The value to push to the iterable
+</ResponseField>
+
+**Example:**
+
+```typescript
+const pt = createPassthrough<number>();
+pt.push(42);
+pt.push(100);
+```
+
+#### end()
+
+Signal that no more values will be pushed. This completes the async iteration.
+
+```typescript
+pt.end(): void
+```
+
+**Example:**
+
+```typescript
+const pt = createPassthrough<string>();
+
+pt.push("first");
+pt.push("last");
+pt.end(); // Signals completion
+
+// The for-await loop will now exit after consuming all values
+for await (const value of pt.iterable) {
+  console.log(value);
+}
+```
+
+## Use Cases
+
+### Coordinating Subagent Spawning
+
+Use `Deferred` to wait for subagent completion:
+
+```typescript
+import { deferred } from "@llm-gateway/ai/primitives";
+
+const completion = deferred<string>();
+
+async function spawnSubagent() {
+  const runId = await spawn("Analyze this code");
+  
+  // Register listener for completion
+  onSubagentComplete(runId, (result) => {
+    completion.resolve(result);
+  });
+  
+  return completion.promise;
+}
+
+const result = await spawnSubagent();
+console.log("Subagent result:", result);
+```
+
+### Event Buffering with AsyncQueue
+
+Use `AsyncQueue` to buffer events between async boundaries:
+
+```typescript
+import { AsyncQueue } from "@llm-gateway/ai/primitives";
+import type { HarnessEvent } from "@llm-gateway/ai/types";
+
+const eventQueue = new AsyncQueue<HarnessEvent>();
+
+// Producer: receive events from harness
+async function* harness() {
+  for await (const event of harnessGenerator) {
+    eventQueue.push(event);
+  }
+}
+
+// Consumer: process events at different rate
+async function processEvents() {
+  while (true) {
+    const event = await eventQueue.pop();
+    await handleEvent(event);
+  }
+}
+```
+
+### Multiplexing with Passthrough
+
+Use `Passthrough` to bridge imperative event sources with async iteration:
+
+```typescript
+import { createPassthrough } from "@llm-gateway/ai/primitives";
+import type { HarnessEvent } from "@llm-gateway/ai/types";
+
+const pt = createPassthrough<HarnessEvent>();
+
+// Register with multiplexer
+multiplexer.add(pt.iterable);
+
+// Feed events from subagent
+for await (const event of subagent.invoke(params)) {
+  pt.push(event);
+}
+pt.end();
+```

@@ -1,0 +1,190 @@
+---
+title: Conversation
+description: State management for client-side conversation handling
+---
+
+The conversation module provides state management for transforming a flat stream of server events into a structured conversation state. It tracks the conversation graph, session metadata, pending relay requests, and connection status.
+
+## Types
+
+### ConversationState
+
+The complete state of a client-side conversation.
+
+<ParamField path="graph" type="Graph">
+  The conversation graph containing all nodes and edges.
+</ParamField>
+
+<ParamField path="sessionId" type="string | null">
+  The current session identifier, or null if not yet connected.
+</ParamField>
+
+<ParamField path="pendingRelays" type="PendingRelay[]">
+  Array of relay requests awaiting user approval.
+</ParamField>
+
+<ParamField path="isConnected" type="boolean">
+  Whether the SSE stream is currently connected.
+</ParamField>
+
+### PendingRelay
+
+Represents a permission request waiting for user action.
+
+<ParamField path="relayId" type="string">
+  Unique identifier for this relay request.
+</ParamField>
+
+<ParamField path="runId" type="string">
+  The run that initiated this relay.
+</ParamField>
+
+<ParamField path="toolCallId" type="string">
+  The tool call that triggered this permission request.
+</ParamField>
+
+<ParamField path="tool" type="string">
+  Name of the tool requiring permission.
+</ParamField>
+
+<ParamField path="params" type="Record<string, unknown>">
+  Parameters for the tool call.
+</ParamField>
+
+### ConversationEvent
+
+Union of all events the conversation reducer can process.
+
+```typescript
+type ConversationEvent =
+  | ServerEvent
+  | { type: "user"; runId: string; parentId?: string; content: string | ContentPart[]; timestamp?: number }
+  | { type: "stream_start" }
+  | { type: "stream_end" }
+  | { type: "relay_resolved"; relayId: string; tool: string; approved: boolean }
+```
+
+## Functions
+
+### createInitialConversation
+
+Creates a new empty conversation state.
+
+```typescript
+function createInitialConversation(): ConversationState
+```
+
+**Returns:** A fresh `ConversationState` with an empty graph and no active session.
+
+**Example:**
+
+```typescript
+import { createInitialConversation } from "@llm-gateway/client";
+
+const [state, setState] = useState(createInitialConversation());
+```
+
+### reduceConversation
+
+Pure reducer that applies an event to produce a new conversation state.
+
+```typescript
+function reduceConversation(
+  state: ConversationState,
+  event: ConversationEvent
+): ConversationState
+```
+
+<ParamField path="state" type="ConversationState" required>
+  The current conversation state.
+</ParamField>
+
+<ParamField path="event" type="ConversationEvent" required>
+  The event to apply.
+</ParamField>
+
+**Returns:** A new `ConversationState` with the event applied.
+
+**Example:**
+
+```typescript
+import { reduceConversation } from "@llm-gateway/client";
+
+// Handle user message
+setState((s) => reduceConversation(s, {
+  type: "user",
+  runId: "user-1",
+  content: "Hello, world!"
+}));
+
+// Start streaming
+setState((s) => reduceConversation(s, { type: "stream_start" }));
+
+// Process server events
+for await (const event of stream) {
+  setState((s) => reduceConversation(s, event));
+}
+
+// End streaming
+setState((s) => reduceConversation(s, { type: "stream_end" }));
+```
+
+## Event Handling
+
+The reducer handles different event types:
+
+- **connected**: Sets the session ID
+- **user**: Adds a user message to the graph
+- **relay**: Adds to pending relays and updates the graph
+- **relay_resolved**: Removes the relay from pending list
+- **stream_start**: Marks connection as active
+- **stream_end**: Marks connection as inactive
+- **All other ServerEvents**: Passed through to the graph reducer
+
+## Usage Pattern
+
+```typescript
+import {
+  createInitialConversation,
+  reduceConversation,
+  createSSETransport,
+} from "@llm-gateway/client";
+
+function ChatApp() {
+  const [state, setState] = useState(createInitialConversation());
+  const transport = createSSETransport({ baseUrl: "http://localhost:3000" });
+
+  const sendMessage = async (content: string) => {
+    // Add user message
+    const userId = `user-${Date.now()}`;
+    setState((s) => reduceConversation(s, {
+      type: "user",
+      runId: userId,
+      content
+    }));
+
+    // Start streaming
+    setState((s) => reduceConversation(s, { type: "stream_start" }));
+
+    try {
+      const stream = transport.stream({
+        model: "claude-4.5-sonnet",
+        messages: [...projectMessages(state.graph), { role: "user", content }]
+      });
+
+      for await (const event of stream) {
+        setState((s) => reduceConversation(s, event));
+      }
+    } finally {
+      setState((s) => reduceConversation(s, { type: "stream_end" }));
+    }
+  };
+
+  return (
+    <div>
+      <ConversationView state={state} />
+      <input onSubmit={(e) => sendMessage(e.target.value)} />
+    </div>
+  );
+}
+```

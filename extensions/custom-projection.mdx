@@ -1,0 +1,631 @@
+---
+title: "Building Custom Projections"
+description: "Create custom views from the conversation hypergraph"
+---
+
+Projections transform the conversation hypergraph into view-specific formats. Each projection walks the graph differently depending on what the consumer needs.
+
+## Projection Architecture
+
+LLM Gateway uses a three-tier hypergraph model:
+
+```
+Chunk → Block → Message
+  ↓       ↓        ↓
+  Events aggregated into semantic units
+```
+
+Projections walk this graph to produce different views:
+- **Thread projection** — Flat list of ViewNodes for chat UIs
+- **Messages projection** — LLM API Message[] format for follow-up requests  
+- **DAG projection** — 2D layout for graph visualization
+
+<Info>
+The hypergraph is located in packages/ai/client/hypergraph/ with projections in the projections/ subdirectory.
+</Info>
+
+## Graph Structure
+
+The conversation graph from packages/ai/client/hypergraph/types.ts:
+
+```typescript
+interface ConversationGraph {
+  nodes: Map<NodeId, Node>;
+  edges: Map<EdgeId, Edge>;
+}
+
+type Node = ChunkNode | BlockNode | MessageNode;
+
+interface ChunkNode {
+  kind: "chunk";
+  content: ChunkEvent;  // Original event
+}
+
+interface BlockNode {
+  kind: "block";
+  key: string;  // Semantic grouping key
+}
+
+interface MessageNode {
+  kind: "message";
+  role: "user" | "assistant";
+}
+
+type Edge =
+  | { type: "sequence"; roles: { predecessor: NodeId[]; successor: NodeId[] } }
+  | { type: "block"; roles: { part: NodeId[]; whole: NodeId[] } }
+  | { type: "message"; roles: { part: NodeId[]; whole: NodeId[] } }
+  | { type: "spawn"; roles: { trigger: NodeId[]; invocation: NodeId[] } }
+  | { type: "summary"; roles: { source: NodeId[]; result: NodeId[] } };
+```
+
+## Example: Thread Projection
+
+The thread projection (packages/ai/client/hypergraph/projections/thread.ts:336) produces a flat ViewNode[] for chat UIs:
+
+```typescript
+import type { ConversationGraph, NodeId, ChunkEvent } from "../types";
+import { getNode, findEdges } from "../primitives";
+import { blockOf } from "../queries";
+
+export interface ViewNode {
+  id: string;
+  runId: string;
+  role: "user" | "assistant";
+  content: ViewContent;
+  status: "streaming" | "complete" | "error";
+  branches: ViewNode[][];  // Nested subagent branches
+}
+
+export type ViewContent =
+  | { kind: "text"; text: string }
+  | { kind: "reasoning"; text: string }
+  | { kind: "tool_call"; name: string; input: unknown; output?: unknown }
+  | { kind: "user"; content: string | ContentPart[] }
+  | { kind: "error"; message: string }
+  | { kind: "pending" };
+
+export function projectThread(graph: ConversationGraph): ViewNode[] {
+  if (graph.nodes.size === 0) return [];
+
+  const visited = new Set<NodeId>();
+  const result: ViewNode[] = [];
+  const roots = findRootChunks(graph);
+
+  for (const rootId of roots) {
+    if (visited.has(rootId)) continue;
+    const viewNodes = walkRun(graph, rootId, visited);
+    result.push(...viewNodes);
+  }
+
+  return result;
+}
+```
+
+### Walking the Graph
+
+The core walking logic:
+
+```typescript
+function walkRun(
+  graph: ConversationGraph,
+  startChunkId: NodeId,
+  visited: Set<NodeId>,
+): ViewNode[] {
+  const result: ViewNode[] = [];
+  let current: NodeId | null = startChunkId;
+
+  while (current !== null) {
+    if (visited.has(current)) break;
+    visited.add(current);
+
+    const chunkNode = getNode(graph, current);
+    if (!chunkNode || chunkNode.kind !== "chunk") break;
+
+    const event = chunkNode.content;
+    const content = eventToViewContent(event);
+    const runId = event.runId ?? "";
+
+    // Find same-run continuation (next chunk in sequence)
+    let continuation = findNextChunk(graph, current);
+
+    // Find cross-run targets via spawn edges
+    const crossRunTargets = findSpawnTargets(graph, current);
+
+    // Promotion logic: if no continuation and can promote,
+    // make the first spawn target the continuation
+    const canPromote = event.type !== "tool_call";
+    let branchStarts: NodeId[];
+    
+    if (continuation) {
+      branchStarts = crossRunTargets;
+    } else if (crossRunTargets.length > 0 && canPromote) {
+      continuation = crossRunTargets[0];
+      branchStarts = crossRunTargets.slice(1);
+    } else {
+      branchStarts = crossRunTargets;
+    }
+
+    // Create ViewNode if this chunk produces content
+    if (content !== null) {
+      const lastView = result[result.length - 1];
+      const canMerge =
+        lastView &&
+        lastView.runId === runId &&
+        lastView.content.kind === content.kind &&
+        (content.kind === "text" || content.kind === "reasoning");
+
+      if (canMerge) {
+        // Merge consecutive text/reasoning chunks
+        lastView.content.text += content.text;
+      } else {
+        const viewNode: ViewNode = {
+          id: eventId(event),
+          runId,
+          role: eventRole(event),
+          content,
+          status: deriveRunStatus(graph, runId),
+          branches: [],
+        };
+
+        // Recursively project branches
+        for (const branchStartId of branchStarts) {
+          if (!visited.has(branchStartId)) {
+            const branch = walkRun(graph, branchStartId, visited);
+            if (branch.length > 0) {
+              viewNode.branches.push(branch);
+            }
+          }
+        }
+
+        result.push(viewNode);
+      }
+    }
+
+    // Follow continuation to next chunk
+    current = continuation;
+  }
+
+  return result;
+}
+```
+
+### Helper Functions
+
+```typescript
+function findRootChunks(graph: ConversationGraph): NodeId[] {
+  const roots: NodeId[] = [];
+  
+  for (const [id, node] of graph.nodes) {
+    if (node.kind !== "chunk") continue;
+    
+    // Check if first in its run (no chunk predecessor)
+    const predEdges = findEdges(graph, { 
+      type: "sequence", 
+      node: id, 
+      role: "successor" 
+    });
+    const hasChunkPred = predEdges.some((edge) =>
+      edge.roles.predecessor.some((pid) => 
+        getNode(graph, pid)?.kind === "chunk"
+      ),
+    );
+    if (hasChunkPred) continue;
+    
+    // Check if spawn target (not a root)
+    const spawnEdges = findEdges(graph, { 
+      type: "spawn", 
+      node: id, 
+      role: "invocation" 
+    });
+    if (spawnEdges.length > 0) continue;
+    
+    roots.push(id);
+  }
+  
+  return roots;
+}
+
+function findNextChunk(graph: ConversationGraph, chunkId: NodeId): NodeId | null {
+  const seqEdges = findEdges(graph, { 
+    type: "sequence", 
+    node: chunkId, 
+    role: "predecessor" 
+  });
+  
+  for (const edge of seqEdges) {
+    for (const successorId of edge.roles.successor) {
+      const node = getNode(graph, successorId);
+      if (node?.kind === "chunk") return successorId;
+    }
+  }
+  
+  return null;
+}
+
+function findSpawnTargets(graph: ConversationGraph, chunkId: NodeId): NodeId[] {
+  const blk = blockOf(graph, chunkId);
+  if (!blk) return [];
+  
+  const spawnEdges = findEdges(graph, { 
+    type: "spawn", 
+    node: blk, 
+    role: "trigger" 
+  });
+  
+  const targets: NodeId[] = [];
+  for (const edge of spawnEdges) {
+    targets.push(...edge.roles.invocation);
+  }
+  
+  return targets;
+}
+```
+
+## Example: Messages Projection
+
+The messages projection (packages/ai/client/hypergraph/projections/messages.ts:19) converts the graph to LLM API Message[] format:
+
+```typescript
+import type { Message, ToolCall } from "../../../types";
+import type { ConversationGraph } from "../types";
+import { projectThread } from "./thread";
+
+export function projectMessages(graph: ConversationGraph): Message[] {
+  const viewNodes = projectThread(graph);
+  const messages: Message[] = [];
+
+  // Accumulators for current assistant turn
+  let text: string | null = null;
+  let toolCalls: ToolCall[] = [];
+  let toolOutputs: Array<{ id: string; output: unknown }> = [];
+
+  function flush() {
+    if (text !== null || toolCalls.length > 0) {
+      messages.push({
+        role: "assistant",
+        content: text,
+        tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+      });
+      
+      for (const t of toolOutputs) {
+        messages.push({
+          role: "tool",
+          tool_call_id: t.id,
+          content: serializeOutput(t.output),
+        });
+      }
+    }
+    
+    text = null;
+    toolCalls = [];
+    toolOutputs = [];
+  }
+
+  for (const node of viewNodes) {
+    const c = node.content;
+
+    switch (c.kind) {
+      case "user":
+        flush();
+        messages.push({ role: "user", content: c.content });
+        break;
+
+      case "text":
+        if (toolCalls.length > 0) flush();  // Text after tools = new turn
+        text = text !== null ? text + c.text : c.text;
+        break;
+
+      case "tool_call":
+        toolCalls.push({ id: node.id, name: c.name, arguments: c.input });
+        if (c.output !== undefined) {
+          toolOutputs.push({ id: node.id, output: c.output });
+        }
+        break;
+
+      // Skip reasoning, error, relay, pending
+      default:
+        break;
+    }
+  }
+
+  flush();
+  return messages;
+}
+
+function serializeOutput(output: unknown): string {
+  if (typeof output === "string") return output;
+  return JSON.stringify(output);
+}
+```
+
+<Note>
+The messages projection builds on the thread projection, not the graph directly. This avoids duplicating the complex walking logic.
+</Note>
+
+## Example: DAG Projection
+
+The DAG projection (packages/ai/client/hypergraph/projections/dag.ts:225) computes a 2D layout for graph visualization:
+
+```typescript
+import type { ConversationGraph, NodeId } from "../types";
+import { getNode, findEdges } from "../primitives";
+import { chunksOf, blocksOf, blockOf } from "../queries";
+import { deriveBlockContent } from "../derived";
+
+export interface DAGLayout {
+  nodes: DAGNode[];
+  edges: DAGEdge[];
+  groups: DAGGroup[];
+  totalWidth: number;
+  totalHeight: number;
+}
+
+export interface DAGNode {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  blockType: BlockType;
+  label: string;
+  color: string;
+  borderColor: string;
+}
+
+export interface DAGEdge {
+  source: string;
+  target: string;
+  type: "sequence" | "spawn";
+}
+
+export interface DAGGroup {
+  id: string;
+  edgeType: "message" | "summary";
+  label: string;
+  color: string;
+  borderColor: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function projectDAG(graph: ConversationGraph): DAGLayout {
+  const nodes: DAGNode[] = [];
+  const edges: DAGEdge[] = [];
+  const groups: DAGGroup[] = [];
+  const blockIds = new Set<string>();
+
+  // 1. Collect all block nodes
+  const blockInfos: BlockInfo[] = [];
+  for (const [nodeId, node] of graph.nodes) {
+    if (node.kind !== "block") continue;
+    blockIds.add(nodeId);
+    
+    const blockType = deriveBlockType(graph, nodeId);
+    const label = blockLabel(graph, nodeId);
+    blockInfos.push({
+      id: nodeId,
+      blockType,
+      label,
+      width: nodeWidth(label),
+      height: nodeHeight(label),
+      color: BLOCK_FILL_COLORS[blockType],
+      borderColor: BLOCK_BORDER_COLORS[blockType],
+    });
+  }
+
+  // 2. Collect edges between blocks
+  for (const edge of graph.edges.values()) {
+    if (edge.type === "sequence") {
+      for (const pred of edge.roles.predecessor) {
+        for (const succ of edge.roles.successor) {
+          if (blockIds.has(pred) && blockIds.has(succ)) {
+            edges.push({ source: pred, target: succ, type: "sequence" });
+          }
+        }
+      }
+    } else if (edge.type === "spawn") {
+      for (const trigger of edge.roles.trigger) {
+        if (!blockIds.has(trigger)) continue;
+        for (const inv of edge.roles.invocation) {
+          const invBlockId = blockOf(graph, inv);
+          if (invBlockId && blockIds.has(invBlockId)) {
+            edges.push({ source: trigger, target: invBlockId, type: "spawn" });
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Topological sort
+  const topoOrder = topologicalSort(blockIds, edges);
+
+  // 4. Assign positions (column based on spawn depth, y based on topo order)
+  const positionedNodes = assignPositions(topoOrder, blockInfos, edges, graph);
+  nodes.push(...positionedNodes);
+
+  // 5. Compute message and summary groups
+  for (const edge of graph.edges.values()) {
+    if (edge.type === "message") {
+      const group = computeMessageGroup(graph, edge, positionedNodes);
+      if (group) groups.push(group);
+    } else if (edge.type === "summary") {
+      const group = computeSummaryGroup(graph, edge, positionedNodes);
+      if (group) groups.push(group);
+    }
+  }
+
+  // 6. Compute total dimensions
+  let totalWidth = 0;
+  let totalHeight = 0;
+  for (const node of nodes) {
+    totalWidth = Math.max(totalWidth, node.x + node.width + LAYOUT_PAD);
+    totalHeight = Math.max(totalHeight, node.y + node.height + LAYOUT_PAD);
+  }
+
+  return { nodes, edges, groups, totalWidth, totalHeight };
+}
+```
+
+## Traversal Utilities
+
+The queries module (packages/ai/client/hypergraph/queries.ts) provides graph traversal:
+
+```typescript
+// Downward traversal (whole → parts)
+export function chunksOf(graph: ConversationGraph, blockId: NodeId): NodeId[] {
+  const edges = findEdges(graph, { type: "block", node: blockId, role: "whole" });
+  const chunks: NodeId[] = [];
+  for (const edge of edges) {
+    chunks.push(...edge.roles.part);
+  }
+  return chunks;
+}
+
+export function blocksOf(graph: ConversationGraph, messageId: NodeId): NodeId[] {
+  const edges = findEdges(graph, { type: "message", node: messageId, role: "whole" });
+  const blocks: NodeId[] = [];
+  for (const edge of edges) {
+    blocks.push(...edge.roles.part);
+  }
+  return blocks;
+}
+
+// Upward traversal (part → whole)
+export function blockOf(graph: ConversationGraph, chunkId: NodeId): NodeId | null {
+  const edges = findEdges(graph, { type: "block", node: chunkId, role: "part" });
+  return edges[0]?.roles.whole[0] ?? null;
+}
+
+export function messageOf(graph: ConversationGraph, blockId: NodeId): NodeId | null {
+  const edges = findEdges(graph, { type: "message", node: blockId, role: "part" });
+  return edges[0]?.roles.whole[0] ?? null;
+}
+```
+
+## Creating a Custom Projection
+
+Here's a template for a custom projection:
+
+```typescript
+import type { ConversationGraph, NodeId } from "../types";
+import { getNode, findEdges } from "../primitives";
+import { chunksOf, blocksOf } from "../queries";
+
+export interface MyCustomView {
+  // Define your output format
+}
+
+export function projectMyCustomView(graph: ConversationGraph): MyCustomView {
+  // 1. Identify starting points (root chunks, messages, etc.)
+  const roots: NodeId[] = [];
+  for (const [id, node] of graph.nodes) {
+    // Find roots based on your criteria
+  }
+
+  // 2. Walk the graph
+  const visited = new Set<NodeId>();
+  const result: MyCustomView = { /* ... */ };
+
+  for (const rootId of roots) {
+    if (visited.has(rootId)) continue;
+    // Process this root and its descendants
+    walkFromRoot(graph, rootId, visited, result);
+  }
+
+  return result;
+}
+
+function walkFromRoot(
+  graph: ConversationGraph,
+  startId: NodeId,
+  visited: Set<NodeId>,
+  result: MyCustomView,
+) {
+  let current: NodeId | null = startId;
+
+  while (current !== null) {
+    if (visited.has(current)) break;
+    visited.add(current);
+
+    const node = getNode(graph, current);
+    if (!node) break;
+
+    // Process this node
+    // ...
+
+    // Find next node (sequence, spawn, etc.)
+    current = findNext(graph, current);
+  }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+<Accordion title="Use Existing Projections as Foundation">
+Build on thread or messages projection rather than walking the graph directly:
+
+```typescript
+export function myProjection(graph: ConversationGraph) {
+  const viewNodes = projectThread(graph);
+  // Transform viewNodes into your format
+}
+```
+</Accordion>
+
+<Accordion title="Track Visited Nodes">
+Always maintain a visited set to avoid infinite loops:
+
+```typescript
+const visited = new Set<NodeId>();
+while (current !== null && !visited.has(current)) {
+  visited.add(current);
+  // ...
+}
+```
+</Accordion>
+
+<Accordion title="Use Query Helpers">
+Leverage chunksOf, blocksOf, blockOf, messageOf for traversal:
+
+```typescript
+import { chunksOf, blockOf } from "../queries";
+
+const chunks = chunksOf(graph, blockId);
+const parent = blockOf(graph, chunkId);
+```
+</Accordion>
+
+<Accordion title="Derive Semantic Content">
+Use deriveBlockContent for semantic extraction:
+
+```typescript
+import { deriveBlockContent } from "../derived";
+
+const content = deriveBlockContent(graph, blockId);
+if (content?.kind === "tool_call") {
+  // Handle tool call
+}
+```
+</Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+<CardGroup cols={2}>
+<Card title="Thread Projection Source" icon="code" href="https://github.com/hvent90/llm-gateway/blob/main/packages/ai/client/hypergraph/projections/thread.ts">
+  Study the canonical projection implementation
+</Card>
+<Card title="Hypergraph Types" icon="diagram-project" href="/api/client/graph">
+  Graph node and edge type definitions
+</Card>
+<Card title="Conversation Graph" icon="share-nodes" href="/concepts/conversation-graph">
+  Learn about the three-tier hypergraph model
+</Card>
+<Card title="Client Rendering" icon="display" href="/guides/client-rendering">
+  See projections in action
+</Card>
+</CardGroup>

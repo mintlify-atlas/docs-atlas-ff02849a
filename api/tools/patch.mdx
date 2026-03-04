@@ -1,0 +1,315 @@
+---
+title: "patch"
+description: "Apply file changes using unified diff patches with conflict detection"
+---
+
+## Overview
+
+The `patch` tool enables agents to create, modify, and delete files using a specialized patch grammar format. It supports context-based hunk matching for updates, directory creation for new files, and FileTime-based conflict detection to prevent editing stale files.
+
+## Tool Definition
+
+<ParamField path="patch" type="string" required>
+  The patch to apply, using the patch grammar format. Supports three operation types: Add File, Delete File, and Update File.
+</ParamField>
+
+## Patch Grammar Format
+
+### Add File
+
+Create a new file with specified content:
+
+```
+*** Add File: /path/to/file.txt
+line 1 content
+line 2 content
+line 3 content
+```
+
+### Delete File
+
+Remove an existing file:
+
+```
+*** Delete File: /path/to/file.txt
+```
+
+### Update File
+
+Modify an existing file using hunks with context:
+
+```
+*** Update File: /path/to/file.ts
+@@ ... @@
+ context line before
+-old line to remove
++new line to add
+ context line after
+
+@@ ... @@
+ another context line
+-another old line
++another new line
+```
+
+Each hunk:
+- Starts with `@@ ... @@` marker
+- Contains context lines (unchanged, for matching)
+- Lines prefixed with `-` are removed
+- Lines prefixed with `+` are added
+- Context lines help locate the hunk even if line numbers changed
+
+## Return Value
+
+Returns a context string with results for each operation:
+- `Added /path/to/file` for successful additions
+- `Deleted /path/to/file` for successful deletions
+- `Updated /path/to/file` for successful updates
+- Error message if any operation fails
+
+## Behavior
+
+### Add File Operations
+
+1. Checks if file already exists (fails if it does)
+2. Creates parent directories recursively if needed
+3. Writes content to new file
+4. Records read timestamp via `fileTime.read()`
+
+### Delete File Operations
+
+1. Asserts file hasn't been modified since last read via `fileTime.assert()`
+2. Deletes the file
+3. Fails if file was modified externally
+
+### Update File Operations
+
+1. Asserts file hasn't been modified via `fileTime.assert()`
+2. Acquires write lock via `fileTime.withLock()`
+3. Reads current file content
+4. Applies hunks using context-based matching
+5. Writes updated content
+6. Records new read timestamp
+7. Releases lock
+
+### Permission Derivation
+
+For "always allow" feature, the tool:
+1. Extracts all file paths from the patch
+2. Finds the longest common directory prefix
+3. Returns a glob pattern like `/common/dir/**`
+
+Examples:
+- Single file `/src/foo.ts` → `/src/**`
+- Multiple files `/src/a.ts`, `/src/b.ts` → `/src/**`
+- Different directories `/src/a.ts`, `/lib/b.ts` → `/**`
+
+### Hunk Matching Algorithm
+
+The `applyHunks` function from `./lib/patch-apply.ts`:
+1. Scans file content for matching context lines
+2. Verifies old lines match expected values
+3. Replaces old lines with new lines
+4. Maintains line positions across multiple hunks
+5. Fails if context doesn't match (indicates file changed)
+
+### Error Handling
+
+The tool fails fast on the first error and returns descriptive messages:
+
+- **Parse errors:** `Patch parse error: <message>`
+- **File exists:** `File already exists: /path`
+- **File modified:** `Patch failed on /path: <FileTime assertion error>`
+- **Hunk mismatch:** `Patch failed on /path: <context matching error>`
+
+## Usage Examples
+
+### Creating a New File
+
+```typescript
+import { patchTool } from "@llm-gateway/ai/tools";
+
+const result = await patchTool.execute(
+  {
+    patch: `*** Add File: /home/user/src/config.ts
+export const API_URL = 'https://api.example.com';
+export const TIMEOUT = 5000;
+`
+  },
+  ctx
+);
+
+// result.context: "Added /home/user/src/config.ts"
+```
+
+### Deleting a File
+
+```typescript
+const result = await patchTool.execute(
+  {
+    patch: `*** Delete File: /home/user/src/deprecated.ts`
+  },
+  ctx
+);
+
+// result.context: "Deleted /home/user/src/deprecated.ts"
+```
+
+### Updating a File with Single Hunk
+
+```typescript
+const result = await patchTool.execute(
+  {
+    patch: `*** Update File: /home/user/src/index.ts
+@@ ... @@
+ import { foo } from './foo';
+-import { bar } from './bar';
++import { bar } from './utils/bar';
+ import { baz } from './baz';
+`
+  },
+  ctx
+);
+
+// result.context: "Updated /home/user/src/index.ts"
+```
+
+### Updating with Multiple Hunks
+
+```typescript
+const result = await patchTool.execute(
+  {
+    patch: `*** Update File: /home/user/src/app.ts
+@@ ... @@
+ const PORT = 3000;
+-const HOST = 'localhost';
++const HOST = '0.0.0.0';
+ const ENV = 'development';
+
+@@ ... @@
+ function start() {
+-  console.log('Starting...');
++  console.log(\`Starting on \${HOST}:\${PORT}\`);
+   listen(PORT, HOST);
+ }
+`
+  },
+  ctx
+);
+
+// result.context: "Updated /home/user/src/app.ts"
+```
+
+### Multiple Operations in One Patch
+
+```typescript
+const result = await patchTool.execute(
+  {
+    patch: `*** Add File: /home/user/src/types.ts
+export interface User {
+  id: string;
+  name: string;
+}
+
+*** Update File: /home/user/src/index.ts
+@@ ... @@
+ import { config } from './config';
++import type { User } from './types';
+
+*** Delete File: /home/user/src/old-types.ts
+`
+  },
+  ctx
+);
+
+// result.context:
+// Added /home/user/src/types.ts
+// Updated /home/user/src/index.ts
+// Deleted /home/user/src/old-types.ts
+```
+
+### Handling Conflicts
+
+```typescript
+// First agent reads file
+await readTool.execute({ filePath: "/home/user/src/app.ts" }, ctx);
+
+// External process modifies file (simulated)
+await writeFile("/home/user/src/app.ts", "new content");
+
+// Agent tries to patch (will fail)
+const result = await patchTool.execute(
+  {
+    patch: `*** Update File: /home/user/src/app.ts
+@@ ... @@
+-old line
++new line
+`
+  },
+  ctx
+);
+
+// result.context: "Patch failed on /home/user/src/app.ts: File modified since last read"
+```
+
+## Implementation Details
+
+The tool is defined in `packages/ai/tools/patch.ts` and uses supporting libraries:
+
+- `./lib/patch-parser.ts` - Parses patch grammar into PatchOp structures
+- `./lib/patch-apply.ts` - Applies hunks with context-based matching
+- `./lib/filetime.ts` - Tracks read/write timestamps for conflict detection
+
+### Schema Definition
+
+```typescript
+const schema = z.object({
+  patch: z.string().describe("The patch to apply, using the patch grammar format"),
+});
+```
+
+### PatchOp Types
+
+```typescript
+type PatchOp =
+  | { type: "add"; path: string; content: string }
+  | { type: "delete"; path: string }
+  | { type: "update"; path: string; hunks: Hunk[] };
+```
+
+### Execute Function Flow
+
+1. Parse patch text into PatchOp array using `parsePatch()`
+2. If parse fails, return error immediately
+3. For each operation:
+   - **Add:** Check existence, create dirs, write file, track timestamp
+   - **Delete:** Assert unchanged, delete file
+   - **Update:** Assert unchanged, lock file, read content, apply hunks, write, track timestamp
+4. If any operation fails, return error (no partial application)
+5. Return success message for all operations
+
+### FileTime Integration
+
+```typescript
+// Before delete or update
+await fileTime.assert(op.path); // Throws if modified
+
+// During update (with lock)
+await fileTime.withLock(op.path, async () => {
+  // Apply changes
+});
+
+// After add or update
+await fileTime.read(op.path); // Record new timestamp
+```
+
+## Related Tools
+
+- [read](/api/tools/read) - Read files before patching (required for FileTime tracking)
+- [bash](/api/tools/bash) - Alternative for simple file operations
+- [agent](/api/tools/agent) - Delegate complex refactoring to subagents
+
+## Related Documentation
+
+- [Types Reference](/api/types) - ToolExecutionResult and FileTime types
+- [Custom Tool Guide](/extensions/custom-tool) - How to build custom tools with patch-like functionality

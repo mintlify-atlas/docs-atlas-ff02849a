@@ -1,0 +1,177 @@
+---
+title: POST /chat/relay/:relayId
+description: Resolve permission requests for tool execution
+---
+
+Resolve a relay event (permission request) to allow or deny tool execution. This endpoint is used in response to `relay` events emitted during a chat session.
+
+## Path Parameters
+
+<ParamField path="relayId" type="string" required>
+  The relay ID from the `relay` event's `id` field.
+</ParamField>
+
+## Request Body
+
+<ParamField path="sessionId" type="string" required>
+  The session ID from the initial `connected` event.
+</ParamField>
+
+<ParamField path="response" type="object" required>
+  The permission decision.
+  
+  <Expandable title="properties">
+    <ParamField path="approved" type="boolean" required>
+      Whether to approve or deny the tool execution.
+      - `true` - Allow the tool to execute
+      - `false` - Deny the tool execution
+    </ParamField>
+    
+    <ParamField path="always" type="boolean">
+      If `true` and approved, add this tool permission to the allowlist for future automatic approval. Only valid when `approved: true`.
+    </ParamField>
+    
+    <ParamField path="reason" type="string">
+      Optional reason for denial. Only used when `approved: false`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example Request (Approve)
+
+```bash
+curl -X POST http://localhost:4000/chat/relay/01963a5c-7893-7abc-def0-123456789abc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "01963a5c-7890-7abc-def0-123456789abc",
+    "response": {
+      "approved": true
+    }
+  }'
+```
+
+### Example Request (Approve Always)
+
+```bash
+curl -X POST http://localhost:4000/chat/relay/01963a5c-7893-7abc-def0-123456789abc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "01963a5c-7890-7abc-def0-123456789abc",
+    "response": {
+      "approved": true,
+      "always": true
+    }
+  }'
+```
+
+### Example Request (Deny)
+
+```bash
+curl -X POST http://localhost:4000/chat/relay/01963a5c-7893-7abc-def0-123456789abc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sessionId": "01963a5c-7890-7abc-def0-123456789abc",
+    "response": {
+      "approved": false,
+      "reason": "This operation could delete important files"
+    }
+  }'
+```
+
+## Response
+
+<ResponseField name="success" type="boolean">
+  Always `true` when the relay is successfully resolved.
+</ResponseField>
+
+### Example Response
+
+```json
+{
+  "success": true
+}
+```
+
+## Error Responses
+
+### 400 Bad Request
+
+Returned when required fields are missing:
+
+```json
+{
+  "error": "Invalid JSON body"
+}
+```
+
+or
+
+```json
+{
+  "error": "sessionId and response are required"
+}
+```
+
+### 404 Not Found
+
+Returned when the session or relay ID is not found:
+
+```json
+{
+  "error": "Session not found"
+}
+```
+
+This can happen if:
+- The session ID is invalid or expired
+- The chat stream has already closed
+
+or
+
+```json
+{
+  "error": "Relay not found"
+}
+```
+
+This can happen if:
+- The relay ID is invalid
+- The relay was already resolved
+- The relay expired
+
+## Workflow
+
+1. Client initiates a chat via `POST /chat`
+2. Client receives a `connected` event with `sessionId`
+3. During execution, agent may emit a `relay` event with permission request
+4. Client extracts `id` (relay ID), `tool`, and `params` from the relay event
+5. Client presents permission request to user or policy engine
+6. Client sends approval/denial to `POST /chat/relay/:relayId`
+7. Agent continues execution based on the response
+
+### Example Relay Event
+
+```
+event: relay
+data: {
+  "type": "relay",
+  "kind": "permission",
+  "runId": "01963a5c-7891-7abc-def0-123456789abc",
+  "id": "01963a5c-7893-7abc-def0-123456789abc",
+  "agentId": "01963a5c-7892-7abc-def0-123456789abc",
+  "toolCallId": "call_abc123",
+  "tool": "bash",
+  "params": {
+    "command": "rm -rf ./temp"
+  }
+}
+```
+
+## Notes
+
+- Relay events are emitted when a tool execution requires permission
+- This occurs when the tool doesn't match any rule in the `permissions.allowlist`
+- Sessions are maintained only while the SSE connection is active
+- Once a relay is resolved, the agent continues processing
+- If approved with `always: true`, future calls to that tool with matching parameters will be automatically approved
+- Relay responses must be sent before the session times out or the connection closes

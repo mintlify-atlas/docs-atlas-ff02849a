@@ -1,0 +1,581 @@
+---
+title: Installation
+description: Install and configure LLM Gateway for development and production
+---
+
+# Installation
+
+This guide covers installing LLM Gateway, configuring your environment, and understanding the project structure.
+
+## System Requirements
+
+<CardGroup cols={2}>
+
+<Card title="Runtime" icon="rocket">
+  **Bun 1.0+** required  
+  [Install Bun →](https://bun.sh)
+</Card>
+
+<Card title="Operating System" icon="desktop">
+  macOS, Linux, or WSL2  
+  Windows native not tested
+</Card>
+
+<Card title="Node Version" icon="node-js">
+  Not required  
+  Bun replaces Node.js
+</Card>
+
+<Card title="Memory" icon="memory">
+  2GB+ RAM recommended  
+  For running local models
+</Card>
+
+</CardGroup>
+
+## Installation Steps
+
+<Steps>
+
+### Clone the Repository
+
+```bash
+git clone https://github.com/yourusername/llm-gateway.git
+cd llm-gateway
+```
+
+### Install Dependencies
+
+LLM Gateway uses Bun as both runtime and package manager:
+
+```bash
+bun install
+```
+
+This installs all dependencies from `package.json`:
+
+<Accordion title="View Core Dependencies">
+
+**Runtime & Server:**
+- `hono` - Web framework for HTTP/SSE endpoints
+- `effect` - Error handling and retries
+- `uuid` - Generate unique IDs for events
+
+**LLM Providers:**
+- `@anthropic-ai/sdk` - Anthropic Claude integration
+- `openai` - OpenAI and compatible APIs
+- `@openrouter/sdk` - OpenRouter integration
+
+**Tools & Utilities:**
+- `picomatch` - Glob pattern matching for permissions
+- `zod` - Schema validation and JSON Schema generation
+- `oxfmt` - Code formatter
+
+**Client Libraries:**
+- `react` / `react-dom` - Web client UI
+- `@vitejs/plugin-react` - Build tooling
+
+</Accordion>
+
+### Configure Environment
+
+Copy the example environment file:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your configuration:
+
+```bash .env
+# API Keys - Add at least one
+ZEN_API_KEY=your_zen_api_key_here
+OPENROUTER_API_KEY=
+ANTHROPIC_API_KEY=
+
+# Model Configuration
+DEFAULT_MODEL=glm-4.7
+
+# Logging
+LOG_LEVEL=I  # I=Info, W=Warn, E=Error
+
+# Server Configuration
+PORT=4000
+VITE_PORT=4001
+VITE_BACKEND_URL=http://localhost:4000
+```
+
+<Note>
+  You only need one API key to get started. Choose based on your preferred provider:
+  - **Zen**: Fastest, supports reasoning, free tier available
+  - **OpenRouter**: 100+ models, pay-per-use
+  - **Anthropic**: Direct access to Claude models
+</Note>
+
+### Verify Installation
+
+Test your setup by running the development server:
+
+```bash
+bun run dev:server
+```
+
+You should see:
+
+```
+LLM Gateway server running on http://localhost:4000
+```
+
+Test the API:
+
+```bash
+curl http://localhost:4000/models
+```
+
+Expected response:
+
+```json
+{
+  "models": [
+    "glm-4.7",
+    "nvidia/nemotron-nano-9b-v2:free",
+    ...
+  ],
+  "defaultModel": "glm-4.7"
+}
+```
+
+</Steps>
+
+## Project Structure
+
+Understanding the codebase structure will help you navigate and extend LLM Gateway:
+
+```
+llm-gateway/
+├── packages/ai/           # Core AI orchestration engine
+│   ├── harness/          # Provider and agent harnesses
+│   │   ├── providers/   # LLM provider adapters
+│   │   │   ├── zen.ts      # Zen (default, fastest)
+│   │   │   ├── anthropic.ts
+│   │   │   ├── openai.ts
+│   │   │   └── openrouter.ts
+│   │   └── agent.ts     # Agentic wrapper with tools
+│   ├── tools/           # Built-in tools
+│   │   ├── bash.ts         # Shell command execution
+│   │   ├── read.ts         # File reading
+│   │   ├── patch.ts        # File patching
+│   │   └── agent.ts        # Subagent spawning
+│   ├── client/          # Client-side state management
+│   │   ├── hypergraph/     # Event graph reducer
+│   │   ├── transports/     # SSE and HTTP transports
+│   │   └── projections/    # Graph-to-UI projections
+│   ├── rlm/             # Recursive Language Model
+│   ├── primitives/      # Async coordination utilities
+│   ├── orchestrator.ts  # Multi-agent orchestration
+│   ├── permissions.ts   # Tool permission system
+│   └── types.ts         # Core type definitions
+├── server/              # HTTP/SSE server
+│   └── index.ts           # Hono app with endpoints
+├── clients/             # Client applications
+│   ├── cli/              # Terminal UI client
+│   └── web/              # React web client
+├── .env.example         # Environment template
+└── package.json         # Dependencies and scripts
+```
+
+<Accordion title="Key Modules Explained">
+
+**Harnesses** (`packages/ai/harness/`)
+
+The fundamental primitive - async generators that yield events:
+- **Provider harnesses** make single LLM API calls
+- **Agent harness** wraps providers to add tool execution loop
+- Harnesses compose: `createAgentHarness({ harness: createGeneratorHarness() })`
+
+**Tools** (`packages/ai/tools/`)
+
+Executable capabilities for agents:
+- Each tool has a Zod schema, description, and execute function
+- Tools return `{ context, result }` - context goes to the agent, result to your code
+- Permissions derived from tool parameters using glob patterns
+
+**Client** (`packages/ai/client/`)
+
+Client-side state management:
+- Events → Hypergraph → Projections → UI
+- `projectThread()` for chat UI, `projectMessages()` for API format
+- SSE transport for streaming, HTTP transport for relay resolution
+
+**Orchestrator** (`orchestrator.ts`)
+
+Manages multiple concurrent agents:
+- Multiplexes agent streams via `AgentMultiplexer`
+- Handles permission relays between agents and humans
+- Automatic cleanup when agents complete
+
+</Accordion>
+
+## Development Commands
+
+LLM Gateway provides several npm scripts for development:
+
+### Server Development
+
+```bash
+# Start server with hot reload
+bun run dev:server
+
+# Server runs on http://localhost:4000
+# Changes auto-reload with Bun's --hot flag
+```
+
+The server provides:
+- `GET /models` - List available models
+- `POST /chat` - SSE streaming chat endpoint
+- `POST /chat/relay/:relayId` - Permission resolution
+- `POST /summarize` - Conversation summarization
+
+### Web Client Development
+
+```bash
+# Start web client with Vite
+bun run dev:web
+
+# Opens on http://localhost:4001
+# Hot module replacement enabled
+```
+
+### CLI Client
+
+```bash
+# Run terminal UI client
+bun run dev:cli
+
+# Interactive TUI with streaming responses
+# Uses SolidJS for fine-grained reactivity
+```
+
+### Testing
+
+```bash
+# Run all tests
+bun test
+
+# Run specific test file
+bun test packages/ai/harness/__tests__/agent.test.ts
+
+# Tests use Bun's built-in test runner
+# No mocks - real integrations only
+```
+
+<Note>
+  Tests only output on failure (quiet success, loud failure). This is intentional - see Development Principles in `CLAUDE.md`.
+</Note>
+
+### Code Formatting
+
+```bash
+# Format all code with oxfmt
+bun run format
+
+# Formats src/, packages/, clients/, server/
+```
+
+### Build for Production
+
+```bash
+# Build web client
+bun run build:web
+
+# Output in clients/web/dist/
+# Ready for static hosting
+```
+
+## Environment Variables Reference
+
+Complete list of environment variables:
+
+<ParamField path="ZEN_API_KEY" type="string">
+  API key for Zen provider (OpenAI-compatible with reasoning support)
+</ParamField>
+
+<ParamField path="OPENROUTER_API_KEY" type="string">
+  API key for OpenRouter (access to 100+ models)
+</ParamField>
+
+<ParamField path="ANTHROPIC_API_KEY" type="string">
+  API key for Anthropic Claude models
+</ParamField>
+
+<ParamField path="DEFAULT_MODEL" type="string" default="glm-4.7">
+  Default model to use when none specified in requests
+</ParamField>
+
+<ParamField path="LOG_LEVEL" type="string" default="I">
+  Logging verbosity: `I` (Info), `W` (Warn), `E` (Error)
+</ParamField>
+
+<ParamField path="PORT" type="number" default="4000">
+  Server port for HTTP/SSE endpoints
+</ParamField>
+
+<ParamField path="VITE_PORT" type="number" default="4001">
+  Vite dev server port for web client
+</ParamField>
+
+<ParamField path="VITE_BACKEND_URL" type="string" default="http://localhost:4000">
+  Backend URL for web client to connect to
+</ParamField>
+
+## Provider Setup
+
+Detailed setup for each LLM provider:
+
+<Tabs>
+  <Tab title="Zen">
+    Zen is the default provider, optimized for speed and supporting reasoning tokens.
+
+    **Get an API Key:**
+    1. Visit [opencode.ai/zen](https://opencode.ai/zen)
+    2. Sign up for an account
+    3. Generate an API key
+
+    **Configure:**
+    ```bash .env
+    ZEN_API_KEY=your_key_here
+    DEFAULT_MODEL=glm-4.7
+    ```
+
+    **Supported Models:**
+    - `glm-4.7` - Fast, supports reasoning
+    - `nvidia/nemotron-nano-9b-v2:free` - Free tier
+    - `kimi-k2.5` - Large context window
+
+    **Usage:**
+    ```typescript
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+    
+    const harness = createGeneratorHarness({
+      apiKey: process.env.ZEN_API_KEY,
+      model: "glm-4.7"
+    });
+    ```
+  </Tab>
+  
+  <Tab title="OpenRouter">
+    OpenRouter provides access to 100+ models from multiple providers.
+
+    **Get an API Key:**
+    1. Visit [openrouter.ai](https://openrouter.ai)
+    2. Sign up and add credits
+    3. Generate an API key
+
+    **Configure:**
+    ```bash .env
+    OPENROUTER_API_KEY=your_key_here
+    DEFAULT_MODEL=anthropic/claude-3.5-sonnet
+    ```
+
+    **Popular Models:**
+    - `anthropic/claude-3.5-sonnet` - Best reasoning
+    - `google/gemini-2.0-flash-exp:free` - Fast, free
+    - `meta-llama/llama-3.3-70b-instruct` - Open source
+
+    **Usage:**
+    ```typescript
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/openrouter";
+    
+    const harness = createGeneratorHarness({
+      apiKey: process.env.OPENROUTER_API_KEY
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Anthropic">
+    Direct access to Claude models via Anthropic's API.
+
+    **Get an API Key:**
+    1. Visit [console.anthropic.com](https://console.anthropic.com)
+    2. Create an account and add credits
+    3. Generate an API key
+
+    **Configure:**
+    ```bash .env
+    ANTHROPIC_API_KEY=your_key_here
+    DEFAULT_MODEL=claude-3-5-sonnet-20241022
+    ```
+
+    **Available Models:**
+    - `claude-3-5-sonnet-20241022` - Latest Sonnet
+    - `claude-3-5-haiku-20241022` - Fastest Claude
+    - `claude-3-opus-20240229` - Most capable
+
+    **Usage:**
+    ```typescript
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/anthropic";
+    
+    const harness = createGeneratorHarness({
+      apiKey: process.env.ANTHROPIC_API_KEY
+    });
+    ```
+  </Tab>
+  
+  <Tab title="OpenAI">
+    Use OpenAI models or any OpenAI-compatible API.
+
+    **Get an API Key:**
+    1. Visit [platform.openai.com](https://platform.openai.com)
+    2. Create an account and add credits
+    3. Generate an API key
+
+    **Configure:**
+    ```bash .env
+    OPENAI_API_KEY=your_key_here
+    DEFAULT_MODEL=gpt-4o
+    ```
+
+    **Available Models:**
+    - `gpt-4o` - Latest multimodal
+    - `gpt-4o-mini` - Fast and cheap
+    - `o1` - Advanced reasoning
+
+    **Usage:**
+    ```typescript
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/openai";
+    
+    const harness = createGeneratorHarness({
+      apiKey: process.env.OPENAI_API_KEY
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Docker Setup (Optional)
+
+Run LLM Gateway in a container:
+
+```dockerfile Dockerfile
+FROM oven/bun:1
+
+WORKDIR /app
+
+COPY package.json bun.lockb ./
+RUN bun install --frozen-lockfile
+
+COPY . .
+
+EXPOSE 4000
+
+CMD ["bun", "run", "server/index.ts"]
+```
+
+Build and run:
+
+```bash
+# Build image
+docker build -t llm-gateway .
+
+# Run container
+docker run -p 4000:4000 --env-file .env llm-gateway
+```
+
+Or use Docker Compose:
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  server:
+    build: .
+    ports:
+      - "4000:4000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+```
+
+Run with:
+
+```bash
+docker-compose up
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+
+<Accordion title="Bun installation fails">
+  **Issue:** `curl -fsSL https://bun.sh/install | bash` fails
+  
+  **Solutions:**
+  - Use the manual installation: Download from [bun.sh/install](https://bun.sh/install)
+  - On macOS: `brew install bun`
+  - Check system requirements: macOS 11+, Linux kernel 5.1+
+  - For WSL2: Make sure you're using Ubuntu 20.04+
+</Accordion>
+
+<Accordion title="Dependencies fail to install">
+  **Issue:** `bun install` errors or hangs
+  
+  **Solutions:**
+  - Clear Bun cache: `rm -rf ~/.bun/install/cache`
+  - Update Bun: `bun upgrade`
+  - Check internet connection and firewall
+  - Try with `--verbose` flag: `bun install --verbose`
+</Accordion>
+
+<Accordion title="Server won't start">
+  **Issue:** `bun run dev:server` fails
+  
+  **Solutions:**
+  - Check if port 4000 is in use: `lsof -i :4000`
+  - Verify `.env` file exists and has valid API key
+  - Check logs for specific error messages
+  - Try different port: `PORT=3000 bun run dev:server`
+</Accordion>
+
+<Accordion title="API calls return 401 Unauthorized">
+  **Issue:** LLM provider returns authentication error
+  
+  **Solutions:**
+  - Verify API key is correct in `.env`
+  - Check key hasn't expired or been revoked
+  - Ensure no extra spaces or quotes in `.env` file
+  - Test key with provider's curl example
+</Accordion>
+
+<Accordion title="Tests fail">
+  **Issue:** `bun test` shows failures
+  
+  **Solutions:**
+  - Ensure API keys are set (tests use real integrations)
+  - Check if provider APIs are accessible
+  - Verify no rate limiting is occurring
+  - Run individual test files to isolate issue
+</Accordion>
+
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+
+<Card title="Quickstart Guide" icon="rocket" href="/quickstart">
+  Build your first agent in 5 minutes
+</Card>
+
+<Card title="Core Concepts" icon="lightbulb" href="/concepts/harnesses">
+  Understand harnesses, events, and composition
+</Card>
+
+<Card title="API Reference" icon="book" href="/api/endpoints">
+  Explore HTTP endpoints and types
+</Card>
+
+<Card title="Tool Development" icon="wrench" href="/tools/creating-tools">
+  Create custom tools for your agents
+</Card>
+
+</CardGroup>

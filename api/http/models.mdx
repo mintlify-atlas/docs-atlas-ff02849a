@@ -1,0 +1,92 @@
+---
+title: GET /models
+description: List available models and the default model
+---
+
+Retrieve the list of models supported by the configured harness and the default model (if set).
+
+## Request
+
+No parameters required.
+
+### Example Request
+
+```bash
+curl http://localhost:4000/models
+```
+
+## Response
+
+Returns a JSON object with available models.
+
+<ResponseField name="models" type="array" required>
+  Array of model identifiers in `provider/model-name` format. The specific models available depend on the configured harness and provider.
+  
+  Examples:
+  - `openai/gpt-4o`
+  - `openai/gpt-4o-mini`
+  - `anthropic/claude-3-5-sonnet-20241022`
+  - `anthropic/claude-3-5-haiku-20241022`
+</ResponseField>
+
+<ResponseField name="defaultModel" type="string">
+  The default model used when a model is not specified in chat requests. Only included if:
+  1. A default model is configured on the server
+  2. The default model exists in the `models` array
+  
+  If the configured default model is not in the supported models list, this field is omitted.
+</ResponseField>
+
+### Example Response
+
+```json
+{
+  "models": [
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "openai/o1",
+    "openai/o1-mini",
+    "anthropic/claude-3-5-sonnet-20241022",
+    "anthropic/claude-3-5-haiku-20241022",
+    "google/gemini-2.0-flash-exp",
+    "deepseek/deepseek-chat"
+  ],
+  "defaultModel": "openai/gpt-4o-mini"
+}
+```
+
+### Example Response (No Default)
+
+```json
+{
+  "models": [
+    "openai/gpt-4o",
+    "anthropic/claude-3-5-sonnet-20241022"
+  ]
+}
+```
+
+## Configuration
+
+The default model is set via the `DEFAULT_MODEL` environment variable:
+
+```bash
+DEFAULT_MODEL=openai/gpt-4o-mini bun run dev:server
+```
+
+Or when creating the app programmatically:
+
+```typescript
+import { createApp } from "./server/index";
+
+const app = await createApp({
+  defaultModel: "openai/gpt-4o-mini"
+});
+```
+
+## Notes
+
+- The available models depend on the configured harness and provider
+- Default harness uses the Zen provider which routes to multiple LLM providers
+- Custom harnesses can be configured to support different model sets
+- Model format follows the pattern: `provider/model-name`

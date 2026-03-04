@@ -1,0 +1,187 @@
+---
+title: Agent Harness
+description: Wraps provider harnesses with agentic loop, tool execution, and permission handling
+---
+
+## Overview
+
+The agent harness wraps any single-iteration provider harness to add an agentic loop with tool execution, permission checking, and iteration control. It continues calling the LLM until no tool calls remain or `maxIterations` is reached.
+
+## Import
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+```
+
+## Function Signature
+
+```typescript
+function createAgentHarness(
+  options: AgentHarnessOptions
+): GeneratorHarnessModule
+```
+
+### Parameters
+
+<ParamField path="options" type="AgentHarnessOptions" required>
+  Configuration for the agent harness
+  
+  <ParamField path="options.harness" type="GeneratorHarnessModule" required>
+    The provider harness to wrap (e.g., Zen, Anthropic, OpenAI)
+  </ParamField>
+  
+  <ParamField path="options.maxIterations" type="number" default="10">
+    Maximum number of tool execution loops before forcing completion
+  </ParamField>
+  
+  <ParamField path="options.model" type="string">
+    Default model to use if not specified at invoke time
+  </ParamField>
+</ParamField>
+
+### Returns
+
+<ResponseField name="GeneratorHarnessModule" type="object">
+  A harness module with `invoke()` and `supportedModels()` methods
+</ResponseField>
+
+## What It Does
+
+The agent harness provides four key capabilities:
+
+1. **Agentic Loop**: Continues calling the LLM until no tool calls or `maxIterations` reached
+2. **Permission Handling**: Checks allowlist, yields `relay` events for permissions, waits for `respond()`
+3. **Tool Execution**: Executes tools concurrently with proper context, yields `tool_result` events
+4. **Message History**: Builds up messages array with assistant responses and tool results
+
+## Events Yielded
+
+The agent harness yields these events:
+
+- `harness_start` - Loop begins
+- `text`, `reasoning`, `usage`, `error` - Passed through from provider harness
+- `tool_call` - Tool approved and ready for execution
+- `tool_result` - Tool execution completed
+- `relay` (kind: `permission`) - Permission required for tool execution
+- `harness_end` - Loop completes
+
+## Basic Example
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/zen";
+import { bashTool } from "@llm-gateway/ai/tools/bash";
+
+// Wrap a provider harness with agent capabilities
+const agentHarness = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 10,
+  model: "claude-sonnet-4-20250514",
+});
+
+// Invoke with tools
+for await (const event of agentHarness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "List files in the current directory" }],
+  tools: [bashTool],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+  if (event.type === "tool_call") {
+    console.log(`Calling tool: ${event.name}`);
+  }
+}
+```
+
+## Permission Control
+
+Control tool execution with permissions:
+
+```typescript
+const permissions = {
+  allowlist: [
+    { tool: "bash", params: { command: "ls*" } },  // Allow ls commands
+    { tool: "read", params: {} },                   // Allow all read operations
+  ],
+  deny: [
+    { toolCallId: "call_123", reason: "Unsafe command" },
+  ],
+};
+
+for await (const event of agentHarness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Read config.json" }],
+  tools: [bashTool, readTool],
+  permissions,
+})) {
+  if (event.type === "relay" && event.kind === "permission") {
+    // Handle permission request
+    const approved = await getUserApproval(event.tool, event.params);
+    event.respond({ approved, reason: approved ? undefined : "User denied" });
+  }
+}
+```
+
+## Iteration Control
+
+The agent automatically handles iterations:
+
+```typescript
+const agentHarness = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 5,  // Limit to 5 tool execution rounds
+});
+
+for await (const event of agentHarness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Complex multi-step task" }],
+  tools: [bashTool, readTool, writeTool],
+})) {
+  if (event.type === "harness_end") {
+    // Loop completed - either no more tools or hit maxIterations
+    console.log("Agent finished");
+  }
+}
+```
+
+## Composition Pattern
+
+The agent harness wraps provider harnesses:
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createGeneratorHarness as createZenHarness } from "@llm-gateway/ai/harness/providers/zen";
+import { createGeneratorHarness as createAnthropicHarness } from "@llm-gateway/ai/harness/providers/anthropic";
+
+// Wrap Zen provider
+const zenAgent = createAgentHarness({
+  harness: createZenHarness({ apiKey: process.env.ZEN_API_KEY }),
+  maxIterations: 10,
+});
+
+// Or wrap Anthropic provider
+const anthropicAgent = createAgentHarness({
+  harness: createAnthropicHarness({ apiKey: process.env.ANTHROPIC_API_KEY }),
+  maxIterations: 10,
+});
+```
+
+## Architecture
+
+The agent harness implements a two-pass execution model:
+
+1. **Permission Pass** (sequential): Check each tool call against permissions, yield relay events, wait for approval
+2. **Execution Pass** (concurrent): Execute all approved tools in parallel, yield results
+
+This ensures:
+- Permission checks happen before execution
+- Tool executions can run concurrently for performance
+- Message history is properly maintained
+
+## Related
+
+- [Zen Harness](/api/harnesses/zen) - OpenAI-compatible provider
+- [Anthropic Harness](/api/harnesses/anthropic) - Anthropic Messages API provider
+- [OpenAI Harness](/api/harnesses/openai) - OpenAI Responses API provider
+- [RLM Harness](/api/harnesses/rlm) - Recursive Language Models for long-context tasks

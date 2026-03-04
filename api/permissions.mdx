@@ -1,0 +1,347 @@
+---
+title: "Permissions"
+description: "Permission matching utilities for tool execution control"
+---
+
+## Overview
+
+The permissions module provides pattern matching utilities to control which tools an agent can execute. It uses glob patterns to match tool names and parameters against allowlists.
+
+### Key Features
+
+- Glob pattern matching for tool parameters
+- Flexible allowlist/allowOnce/deny permission model
+- Composable permission rules
+- Support for parameter-level restrictions
+
+## Functions
+
+### matchesPermission()
+
+Check if a tool call matches a specific permission rule.
+
+```typescript
+const matches = matchesPermission(toolCall, permission);
+```
+
+<ParamField path="toolCall" type="ToolCallLike" required>
+  The tool call to check
+</ParamField>
+
+<ParamField path="toolCall.name" type="string" required>
+  Name of the tool being called
+</ParamField>
+
+<ParamField path="toolCall.arguments" type="Record<string, unknown>" optional>
+  Arguments passed to the tool
+</ParamField>
+
+<ParamField path="permission" type="ToolPermission" required>
+  The permission rule to match against
+</ParamField>
+
+<ParamField path="permission.tool" type="string" required>
+  Tool name to match
+</ParamField>
+
+<ParamField path="permission.params" type="Record<string, string>" optional>
+  Parameter patterns (param name → glob pattern)
+</ParamField>
+
+<ResponseField name="matches" type="boolean">
+  Returns true if the tool call matches the permission rule
+</ResponseField>
+
+### matchesPermissions()
+
+Check if a tool call matches any permission in an allowlist or allowOnce list.
+
+```typescript
+const allowed = matchesPermissions(toolCall, permissions);
+```
+
+<ParamField path="toolCall" type="ToolCallLike" required>
+  The tool call to check
+</ParamField>
+
+<ParamField path="permissions" type="Pick<Permissions, 'allowlist' | 'allowOnce'>" optional>
+  Permissions object with allowlist and/or allowOnce arrays
+</ParamField>
+
+<ResponseField name="allowed" type="boolean">
+  Returns true if the tool call matches any permission in the combined allowlist and allowOnce
+</ResponseField>
+
+## Types
+
+### ToolPermission
+
+Defines a permission rule for a tool.
+
+```typescript
+interface ToolPermission {
+  tool: string;
+  params?: Record<string, string>; // param name → glob pattern
+}
+```
+
+### Permissions
+
+Complete permissions structure for an agent.
+
+```typescript
+interface Permissions {
+  allowlist?: ToolPermission[];
+  allowOnce?: ToolPermission[];
+  deny?: Array<{ toolCallId: string; reason?: string }>;
+}
+```
+
+<ParamField path="allowlist" type="ToolPermission[]" optional>
+  Permissions that are always allowed. Matching tool calls execute without requesting approval.
+</ParamField>
+
+<ParamField path="allowOnce" type="ToolPermission[]" optional>
+  Permissions allowed once. After matching, the permission is removed from allowOnce.
+</ParamField>
+
+<ParamField path="deny" type="Array<{ toolCallId: string; reason?: string }>" optional>
+  Explicitly denied tool calls by ID with optional reasons.
+</ParamField>
+
+### ToolCallLike
+
+Minimal interface for tool call matching.
+
+```typescript
+interface ToolCallLike {
+  name: string;
+  arguments?: Record<string, unknown>;
+}
+```
+
+## Examples
+
+### Basic Tool Matching
+
+```typescript
+import { matchesPermission } from "@llm-gateway/ai";
+
+const toolCall = {
+  name: "read",
+  arguments: { path: "/data/file.txt" },
+};
+
+const permission = {
+  tool: "read",
+};
+
+const matches = matchesPermission(toolCall, permission);
+// true - tool name matches, no params specified
+```
+
+### Parameter Pattern Matching
+
+```typescript
+const toolCall = {
+  name: "read",
+  arguments: { path: "/data/users/john.json" },
+};
+
+// Allow reading any file in /data/users/
+const permission = {
+  tool: "read",
+  params: {
+    path: "/data/users/*",
+  },
+};
+
+const matches = matchesPermission(toolCall, permission);
+// true - path matches the glob pattern
+```
+
+### Multiple Parameter Patterns
+
+```typescript
+const toolCall = {
+  name: "bash",
+  arguments: {
+    command: "ls",
+    workdir: "/home/user/projects",
+  },
+};
+
+const permission = {
+  tool: "bash",
+  params: {
+    command: "ls", // Exact match
+    workdir: "/home/user/*", // Glob pattern
+  },
+};
+
+const matches = matchesPermission(toolCall, permission);
+// true - both parameters match
+```
+
+### Allowlist Checking
+
+```typescript
+import { matchesPermissions } from "@llm-gateway/ai";
+
+const permissions = {
+  allowlist: [
+    { tool: "read", params: { path: "/data/*" } },
+    { tool: "grep", params: { path: "/data/*" } },
+  ],
+  allowOnce: [{ tool: "write", params: { path: "/tmp/*" } }],
+};
+
+const readCall = {
+  name: "read",
+  arguments: { path: "/data/file.txt" },
+};
+
+const allowed = matchesPermissions(readCall, permissions);
+// true - matches allowlist
+
+const writeCall = {
+  name: "write",
+  arguments: { path: "/tmp/output.txt" },
+};
+
+const allowedOnce = matchesPermissions(writeCall, permissions);
+// true - matches allowOnce
+```
+
+### Complex Glob Patterns
+
+```typescript
+// Match any .txt or .md file
+const permission = {
+  tool: "read",
+  params: {
+    path: "**/*.{txt,md}",
+  },
+};
+
+matchesPermission({ name: "read", arguments: { path: "docs/guide.md" } }, permission);
+// true
+
+matchesPermission({ name: "read", arguments: { path: "src/code.ts" } }, permission);
+// false
+
+// Match files but not directories
+const filePermission = {
+  tool: "read",
+  params: {
+    path: "**/!(*/)" // Matches anything that doesn't end with /
+  },
+};
+```
+
+### Permission Builder Helper
+
+```typescript
+function createFilePermission(tool: string, basePath: string): ToolPermission {
+  return {
+    tool,
+    params: {
+      path: `${basePath}/**/*`,
+    },
+  };
+}
+
+const permissions = {
+  allowlist: [
+    createFilePermission("read", "/data"),
+    createFilePermission("write", "/output"),
+    { tool: "bash", params: { command: "ls" } },
+  ],
+};
+```
+
+### Runtime Permission Derivation
+
+```typescript
+import type { ToolDefinition } from "@llm-gateway/ai";
+
+const readTool: ToolDefinition = {
+  name: "read",
+  description: "Read a file",
+  schema: z.object({ path: z.string() }),
+  derivePermission: (params) => ({
+    tool: "read",
+    params: {
+      path: params.path, // Allow this specific file
+    },
+  }),
+  execute: async (input) => {
+    // ...
+  },
+};
+
+// When user approves with "always", the orchestrator calls derivePermission
+// and adds the result to the agent's allowlist
+```
+
+### Directory-Scoped Permissions
+
+```typescript
+const permissions = {
+  allowlist: [
+    // Allow all read operations in specific directories
+    { tool: "read", params: { path: "/data/**" } },
+    { tool: "glob", params: { path: "/data/**" } },
+    { tool: "grep", params: { path: "/data/**" } },
+
+    // Allow write operations only in output directory
+    { tool: "write", params: { path: "/output/**" } },
+
+    // Allow bash commands in project directory
+    { tool: "bash", params: { workdir: "/project/**" } },
+  ],
+};
+```
+
+## Glob Pattern Reference
+
+Permissions use the [picomatch](https://github.com/micromatch/picomatch) library with bash mode enabled.
+
+### Common Patterns
+
+| Pattern | Matches |
+|---------|--------|
+| `*` | Any characters except `/` |
+| `**` | Any characters including `/` (recursive) |
+| `?` | Single character |
+| `[abc]` | Any character in the set |
+| `{a,b}` | Either `a` or `b` |
+| `!(pattern)` | Anything except the pattern |
+
+### Examples
+
+```typescript
+// Match specific file
+{ path: "config.json" }
+
+// Match all files in directory
+{ path: "/data/*" }
+
+// Match all files recursively
+{ path: "/data/**/*" }
+
+// Match specific extension
+{ path: "**/*.ts" }
+
+// Match multiple extensions
+{ path: "**/*.{ts,js,tsx,jsx}" }
+
+// Match except pattern
+{ path: "!**/node_modules/**" }
+
+// Combine patterns (both must match)
+{
+  path: "/data/**/*.json",
+  size: "<1000000" // Custom validation if supported
+}
+```

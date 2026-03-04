@@ -1,0 +1,233 @@
+---
+title: Projections
+description: Transform conversation graphs into different view formats
+---
+
+Projections transform the flat conversation graph into specialized formats optimized for different use cases: threaded chat views, LLM API messages, and DAG visualizations.
+
+## Thread Projection
+
+The thread projection transforms a graph into a nested structure suitable for chat UI rendering, with support for branches (subagents), tool calls, and streaming states.
+
+### projectThread
+
+Projects a conversation graph into a flat list of view nodes for rendering.
+
+```typescript
+function projectThread(graph: Graph): ViewNode[]
+```
+
+<ParamField path="graph" type="Graph" required>
+  The conversation graph to project.
+</ParamField>
+
+**Returns:** Array of `ViewNode` objects in conversation order.
+
+### ViewNode
+
+Represents a renderable conversation block.
+
+<ParamField path="id" type="string">
+  Unique identifier for this view node.
+</ParamField>
+
+<ParamField path="runId" type="string">
+  The execution run that produced this node.
+</ParamField>
+
+<ParamField path="role" type="'user' | 'assistant'">
+  The role of the message sender.
+</ParamField>
+
+<ParamField path="content" type="ViewContent">
+  The content to display.
+</ParamField>
+
+<ParamField path="status" type="'streaming' | 'complete' | 'error'">
+  Current status derived from graph lifecycle nodes.
+</ParamField>
+
+<ParamField path="branches" type="ViewNode[][]">
+  Nested branches (subagent runs). Each array represents one branch path.
+</ParamField>
+
+### ViewContent
+
+Union type representing different content kinds.
+
+```typescript
+type ViewContent =
+  | { kind: "text"; text: string }
+  | { kind: "reasoning"; text: string }
+  | { kind: "tool_call"; name: string; input: unknown; output?: unknown; progress?: unknown }
+  | { kind: "user"; content: string | ContentPart[] }
+  | { kind: "error"; message: string }
+  | { kind: "pending" }
+  | { kind: "relay"; relayKind: "permission"; toolCallId: string; tool: string; params: Record<string, unknown> }
+```
+
+### Example: Thread Projection
+
+```typescript
+import { projectThread } from "@llm-gateway/client";
+
+function ConversationView({ graph }) {
+  const viewNodes = projectThread(graph);
+
+  return (
+    <div>
+      {viewNodes.map((node) => (
+        <div key={node.id} className={node.role}>
+          {node.content.kind === "text" && <p>{node.content.text}</p>}
+          
+          {node.content.kind === "tool_call" && (
+            <div>
+              <strong>{node.content.name}</strong>
+              <pre>{JSON.stringify(node.content.input, null, 2)}</pre>
+              {node.content.output && (
+                <pre>{JSON.stringify(node.content.output, null, 2)}</pre>
+              )}
+            </div>
+          )}
+
+          {node.content.kind === "relay" && (
+            <div className="permission-prompt">
+              <p>Permission required: {node.content.tool}</p>
+              <button onClick={() => handleAllow(node)}>Allow</button>
+              <button onClick={() => handleDeny(node)}>Deny</button>
+            </div>
+          )}
+
+          {/* Render nested branches */}
+          {node.branches.map((branch, i) => (
+            <div key={i} className="branch">
+              {branch.map((child) => (
+                <NestedNode key={child.id} node={child} />
+              ))}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+## Messages Projection
+
+The messages projection converts a graph into the standard LLM API message format.
+
+### projectMessages
+
+Projects a conversation graph into an array of API messages.
+
+```typescript
+function projectMessages(graph: Graph): Message[]
+```
+
+<ParamField path="graph" type="Graph" required>
+  The conversation graph to project.
+</ParamField>
+
+**Returns:** Array of `Message` objects suitable for LLM API requests.
+
+### Message Format
+
+```typescript
+type Message =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | ContentPart[] }
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string | ContentPart[] }
+```
+
+### Example: Messages Projection
+
+```typescript
+import { projectMessages } from "@llm-gateway/client";
+
+function sendChatRequest(graph, userMessage) {
+  // Project current graph to messages
+  const messages = projectMessages(graph);
+  
+  // Append new user message
+  messages.push({ role: "user", content: userMessage });
+
+  // Send to LLM API
+  const response = await fetch("/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-4.5-sonnet",
+      messages
+    })
+  });
+
+  return response;
+}
+```
+
+## Projection Behavior
+
+### Tool Call Merging
+
+Tool results are attached back to their originating tool call nodes:
+
+```typescript
+// Graph has separate tool_call and tool_result nodes
+graph.nodes.get("call-1") // { kind: "tool_call", name: "search", input: {...} }
+graph.nodes.get("call-1:result") // { kind: "tool_result", output: {...} }
+
+// Thread projection merges them
+viewNodes[0].content // { kind: "tool_call", name: "search", input: {...}, output: {...} }
+```
+
+### Progress Accumulation
+
+Tool progress events are accumulated using registered accumulators:
+
+```typescript
+// Multiple progress events for same tool call
+graph.nodes.get("progress-1") // { kind: "tool_progress", toolCallId: "call-1", content: {...} }
+graph.nodes.get("progress-2") // { kind: "tool_progress", toolCallId: "call-1", content: {...} }
+
+// Thread projection accumulates them
+viewNodes[0].content // { kind: "tool_call", progress: accumulatedState }
+```
+
+### Branch Detection
+
+Cross-run edges create branches:
+
+```typescript
+// Parent tool call spawns subagent
+tool_call_1 -> harness_start (different runId) // creates branch
+
+// Rendered as nested structure
+ViewNode {
+  content: { kind: "tool_call", name: "spawn_agent" },
+  branches: [[
+    ViewNode { content: { kind: "text", text: "Subagent output" } }
+  ]]
+}
+```
+
+### Status Derivation
+
+Node status is derived from graph lifecycle nodes:
+
+- **streaming**: `harness_start` exists but no `harness_end`
+- **complete**: `harness_end` exists
+- **error**: `{runId}:error` node exists
+- User messages default to **complete**
+
+### Filtering
+
+Structural nodes are filtered from thread projection:
+
+- `harness_start`, `harness_end` (lifecycle)
+- `usage` (metrics)
+- `tool_result` (merged into tool_call)
+- `tool_progress` (accumulated into tool_call)
+
+They still exist in the graph for edge construction and status derivation but don't produce their own ViewNodes.

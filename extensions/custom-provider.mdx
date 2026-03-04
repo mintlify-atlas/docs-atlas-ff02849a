@@ -1,0 +1,471 @@
+---
+title: "Building a Custom Provider"
+description: "Create custom LLM provider harnesses for LLM Gateway"
+---
+
+Provider harnesses make single LLM API calls and yield events. They implement the `GeneratorHarnessModule` interface and handle streaming responses from any LLM API.
+
+## Provider Architecture
+
+Providers are **single-iteration** harnesses that:
+- Make one LLM API call per invocation
+- Stream events incrementally (text, reasoning, tool_call, usage, error)
+- Do NOT execute tools, handle permissions, or loop after tool calls
+- Get wrapped by the agent harness for agentic behavior
+
+<Note>
+The agent harness (packages/ai/harness/agent.ts:31) wraps provider harnesses to add tool execution, permission checking, and multi-turn iteration.
+</Note>
+
+## Interface Requirements
+
+Providers must implement `GeneratorHarnessModule` from packages/ai/types.ts:193:
+
+```typescript
+interface GeneratorHarnessModule {
+  invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent>;
+  supportedModels(): Promise<string[]>;
+}
+```
+
+### GeneratorInvokeParams
+
+```typescript
+interface GeneratorInvokeParams {
+  model?: string;
+  messages: Message[];
+  tools?: ToolDefinition[];
+  env?: {
+    parentId?: string;
+    spawn?: (task: string, parentId: string) => Promise<string>;
+    fileTime?: FileTime;
+  };
+  permissions?: Permissions;
+}
+```
+
+### Events to Yield
+
+Providers should yield these event types from packages/ai/types.ts:77:
+
+- **text** — Streamed text content chunks
+- **reasoning** — Streamed thinking/reasoning content (for models that support it)
+- **tool_call** — Tool invocations from the model
+- **usage** — Token usage statistics (input/output/cached)
+- **error** — Any errors during the API call
+
+<Warning>
+Providers must NOT yield `tool_result`, `harness_start`, `harness_end`, or `relay` events — those are handled by the agent wrapper.
+</Warning>
+
+## Example: Zen Provider
+
+The Zen provider (packages/ai/harness/providers/zen.ts) is the canonical reference implementation. Here's the structure:
+
+### 1. Setup and Configuration
+
+```typescript
+import { v7 } from "uuid";
+import { toJSONSchema } from "zod";
+import type {
+  GeneratorHarnessModule,
+  GeneratorInvokeParams,
+  HarnessEvent,
+} from "../../types";
+
+interface ZenHarnessOptions {
+  apiKey?: string;
+  model?: string;
+}
+
+function createGeneratorHarness(
+  apiKeyOrOptions?: string | ZenHarnessOptions,
+): GeneratorHarnessModule {
+  const opts = typeof apiKeyOrOptions === "string" 
+    ? { apiKey: apiKeyOrOptions } 
+    : apiKeyOrOptions;
+  const key = opts?.apiKey ?? process.env.ZEN_API_KEY;
+  const defaultModel = opts?.model;
+
+  return {
+    async *invoke({ env, ...params }: GeneratorInvokeParams) {
+      // Implementation
+    },
+    async supportedModels(): Promise<string[]> {
+      // Fetch available models
+    },
+  };
+}
+```
+
+### 2. Convert Messages and Tools
+
+Providers must convert LLM Gateway's universal format to their API's format:
+
+```typescript
+function convertMessages(messages: Message[]) {
+  return messages.map((msg) => {
+    if (msg.role === "tool") {
+      return {
+        role: "tool",
+        tool_call_id: msg.tool_call_id,
+        content: Array.isArray(msg.content) 
+          ? JSON.stringify(msg.content) 
+          : msg.content,
+      };
+    }
+    if (msg.role === "assistant" && msg.tool_calls?.length) {
+      return {
+        role: "assistant",
+        content: msg.content,
+        tool_calls: msg.tool_calls.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: {
+            name: tc.name,
+            arguments: typeof tc.arguments === "string" 
+              ? tc.arguments 
+              : JSON.stringify(tc.arguments ?? {}),
+          },
+        })),
+      };
+    }
+    return { role: msg.role, content: msg.content };
+  });
+}
+
+function convertTools(tools: ToolDefinition[]) {
+  return tools.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: toJSONSchema(t.schema),
+    },
+  }));
+}
+```
+
+### 3. Stream and Parse Responses
+
+```typescript
+async *invoke({ env, ...params }: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+  const model = params.model ?? defaultModel;
+  if (!model) {
+    throw new Error("No model specified");
+  }
+
+  const runId = v7();
+  const parentId = env?.parentId;
+  const textId = v7();
+  const reasoningId = v7();
+
+  // Helper to add parentId to events
+  const tag = <T extends object>(event: T): T & { parentId?: string } =>
+    parentId ? { ...event, parentId } : event;
+
+  // Make API request
+  const response = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: convertMessages(params.messages),
+      tools: params.tools?.length ? convertTools(params.tools) : undefined,
+      stream: true,
+    }),
+  });
+
+  if (!response.ok) {
+    yield tag({ 
+      type: "error", 
+      runId, 
+      error: new Error(`API returned ${response.status}`) 
+    });
+    return;
+  }
+
+  // Parse SSE stream
+  for await (const data of parseSSE(response.body)) {
+    const chunk = JSON.parse(data);
+    const delta = chunk.choices?.[0]?.delta;
+
+    // Yield text content
+    if (delta.content) {
+      yield tag({ 
+        type: "text", 
+        runId, 
+        id: textId, 
+        content: delta.content 
+      });
+    }
+
+    // Yield reasoning content (if supported)
+    if (delta.reasoning_content) {
+      yield tag({ 
+        type: "reasoning", 
+        runId, 
+        id: reasoningId, 
+        content: delta.reasoning_content 
+      });
+    }
+
+    // Accumulate tool calls
+    if (delta.tool_calls) {
+      // Collect tool call deltas
+    }
+  }
+
+  // Yield complete tool_call events
+  for (const tc of toolCallsMap.values()) {
+    let args: unknown;
+    try {
+      args = JSON.parse(tc.arguments);
+    } catch (e) {
+      // Mark malformed tool calls with __toolParseError
+      args = {
+        __toolParseError: true,
+        parseError: e.message,
+        rawArguments: tc.arguments,
+      };
+    }
+    yield tag({ 
+      type: "tool_call", 
+      runId, 
+      name: tc.name, 
+      id: tc.id, 
+      input: args 
+    });
+  }
+
+  // Yield usage statistics
+  if (usageData) {
+    yield tag({
+      type: "usage",
+      runId,
+      inputTokens: usageData.prompt_tokens,
+      outputTokens: usageData.completion_tokens,
+      cacheReadTokens: usageData.cache_read_input_tokens,
+      cacheCreationTokens: usageData.cache_creation_input_tokens,
+    });
+  }
+}
+```
+
+### 4. Implement supportedModels
+
+```typescript
+async supportedModels(): Promise<string[]> {
+  const response = await fetch(`${BASE_URL}/models`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  const json = await response.json();
+  return json.data.map((m: any) => m.id);
+}
+```
+
+## Anthropic Provider Example
+
+The Anthropic provider (packages/ai/harness/providers/anthropic.ts) shows how to handle a different API structure:
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+
+function createGeneratorHarness(
+  apiKeyOrOptions?: string | AnthropicHarnessOptions,
+): GeneratorHarnessModule {
+  const client = new Anthropic({
+    apiKey: opts?.apiKey ?? process.env.ANTHROPIC_API_KEY,
+  });
+
+  return {
+    async *invoke({ env, ...params }) {
+      const stream = await client.messages.create({
+        model,
+        max_tokens: 4096,
+        messages: convertMessages(params.messages),
+        system: getSystemMessage(params.messages),
+        tools: params.tools ? convertTools(params.tools) : undefined,
+        stream: true,
+      });
+
+      for await (const event of stream) {
+        if (event.type === "content_block_delta") {
+          if (event.delta.type === "text_delta") {
+            yield tag({ 
+              type: "text", 
+              runId, 
+              id: textId, 
+              content: event.delta.text 
+            });
+          } else if (event.delta.type === "thinking_delta") {
+            yield tag({ 
+              type: "reasoning", 
+              runId, 
+              id: reasoningId, 
+              content: event.delta.thinking 
+            });
+          }
+        }
+      }
+    },
+    async supportedModels() {
+      const models: string[] = [];
+      for await (const model of client.models.list()) {
+        models.push(model.id);
+      }
+      return models;
+    },
+  };
+}
+```
+
+## Testing Your Provider
+
+Create tests using the deterministic provider pattern from packages/ai/harness/providers/__tests__/zen.test.ts:
+
+```typescript
+import { describe, test, expect } from "bun:test";
+import { createGeneratorHarness } from "../my-provider";
+
+describe("MyProvider", () => {
+  test("yields text events", async () => {
+    const harness = createGeneratorHarness({ apiKey: "test" });
+    const events: any[] = [];
+
+    for await (const event of harness.invoke({
+      model: "test-model",
+      messages: [{ role: "user", content: "Hello" }],
+    })) {
+      events.push(event);
+    }
+
+    const textEvents = events.filter((e) => e.type === "text");
+    expect(textEvents.length).toBeGreaterThan(0);
+  });
+
+  test("handles tool calls", async () => {
+    const harness = createGeneratorHarness({ apiKey: "test" });
+    const tools = [
+      {
+        name: "test_tool",
+        description: "Test tool",
+        schema: z.object({ arg: z.string() }),
+      },
+    ];
+
+    const events: any[] = [];
+    for await (const event of harness.invoke({
+      model: "test-model",
+      messages: [{ role: "user", content: "Use the tool" }],
+      tools,
+    })) {
+      events.push(event);
+    }
+
+    const toolCalls = events.filter((e) => e.type === "tool_call");
+    expect(toolCalls.length).toBeGreaterThan(0);
+  });
+});
+```
+
+## Composition with Agent Harness
+
+Once your provider is working, compose it with the agent harness for full agentic behavior:
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createMyProviderHarness } from "./my-provider";
+
+const providerHarness = createMyProviderHarness({ apiKey: "..." });
+const agentHarness = createAgentHarness({
+  harness: providerHarness,
+  maxIterations: 10,
+  model: "my-model",
+});
+
+// Now agentHarness handles tool execution and permission checking
+for await (const event of agentHarness.invoke({
+  messages: [{ role: "user", content: "Hello" }],
+  tools: [bashTool, readTool],
+})) {
+  console.log(event);
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+<Accordion title="Error Handling">
+Always wrap API calls in try-catch and yield error events:
+
+```typescript
+try {
+  const response = await fetch(...);
+} catch (error) {
+  yield tag({ 
+    type: "error", 
+    runId, 
+    error: error instanceof Error ? error : new Error(String(error)) 
+  });
+  return;
+}
+```
+</Accordion>
+
+<Accordion title="Unique IDs">
+Use `v7()` from uuid for generating runId and content IDs. Reuse the same ID for all chunks of the same content stream:
+
+```typescript
+const textId = v7();
+for (const chunk of chunks) {
+  yield { type: "text", runId, id: textId, content: chunk };
+}
+```
+</Accordion>
+
+<Accordion title="ParentId Tagging">
+Always tag events with parentId when provided via env:
+
+```typescript
+const tag = <T extends object>(event: T) =>
+  parentId ? { ...event, parentId } : event;
+```
+</Accordion>
+
+<Accordion title="Malformed Tool Arguments">
+Mark unparseable tool arguments with `__toolParseError` so the agent can report them to the LLM:
+
+```typescript
+try {
+  args = JSON.parse(tc.arguments);
+} catch (e) {
+  args = {
+    __toolParseError: true,
+    parseError: e.message,
+    rawArguments: tc.arguments,
+  };
+}
+```
+</Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+<CardGroup cols={2}>
+<Card title="Agent Harness" icon="arrows-spin" href="/api/harnesses/agent">
+  Learn how the agent wrapper adds tool execution
+</Card>
+<Card title="Events Reference" icon="bolt" href="/api/types">
+  Complete HarnessEvent type definitions
+</Card>
+<Card title="Zen Provider Source" icon="code" href="https://github.com/hvent90/llm-gateway/blob/main/packages/ai/harness/providers/zen.ts">
+  View the canonical provider implementation
+</Card>
+<Card title="Anthropic Provider" icon="code" href="https://github.com/hvent90/llm-gateway/blob/main/packages/ai/harness/providers/anthropic.ts">
+  See how to adapt different API patterns
+</Card>
+</CardGroup>

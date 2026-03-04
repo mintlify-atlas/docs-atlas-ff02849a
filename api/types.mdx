@@ -1,0 +1,522 @@
+---
+title: "Types"
+description: "Core TypeScript types for the LLM Gateway harness interface"
+---
+
+## Overview
+
+The LLM Gateway provides a comprehensive type system for building harnesses, handling messages, managing tools, and controlling event flow. All types follow OpenAI's messaging patterns with dedicated tool roles.
+
+## Message Types
+
+### ContentPart
+
+Content parts for multipart messages supporting text, images, and documents.
+
+```typescript
+type TextContentPart = { type: "text"; text: string };
+type ImageContentPart = { type: "image"; mediaType: string; data: string };
+type DocumentContentPart = { type: "document"; mediaType: string; data: string };
+type ContentPart = TextContentPart | ImageContentPart | DocumentContentPart;
+```
+
+<ResponseField name="type" type="string" required>
+  The content type: `"text"`, `"image"`, or `"document"`
+</ResponseField>
+
+<ResponseField name="text" type="string">
+  Text content (only for `type: "text"`)
+</ResponseField>
+
+<ResponseField name="mediaType" type="string">
+  MIME type for images and documents (e.g., `"image/png"`, `"application/pdf"`)
+</ResponseField>
+
+<ResponseField name="data" type="string">
+  Base64-encoded content for images and documents
+</ResponseField>
+
+### Message
+
+Message structure following OpenAI's pattern with dedicated tool role.
+
+```typescript
+type Message =
+  | { role: "system"; content: string }
+  | { role: "user"; content: string | ContentPart[] }
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[] }
+  | { role: "tool"; tool_call_id: string; content: string | ContentPart[] };
+```
+
+#### System Message
+
+<ResponseField name="role" type="'system'" required>
+  System role identifier
+</ResponseField>
+
+<ResponseField name="content" type="string" required>
+  System instructions or context
+</ResponseField>
+
+#### User Message
+
+<ResponseField name="role" type="'user'" required>
+  User role identifier
+</ResponseField>
+
+<ResponseField name="content" type="string | ContentPart[]" required>
+  User message as plain text or multipart content
+</ResponseField>
+
+#### Assistant Message
+
+<ResponseField name="role" type="'assistant'" required>
+  Assistant role identifier
+</ResponseField>
+
+<ResponseField name="content" type="string | null" required>
+  Assistant response text (null when only tool calls present)
+</ResponseField>
+
+<ResponseField name="tool_calls" type="ToolCall[]">
+  Tool invocations requested by the assistant
+</ResponseField>
+
+#### Tool Message
+
+<ResponseField name="role" type="'tool'" required>
+  Tool role identifier
+</ResponseField>
+
+<ResponseField name="tool_call_id" type="string" required>
+  ID of the tool call this message responds to
+</ResponseField>
+
+<ResponseField name="content" type="string | ContentPart[]" required>
+  Tool execution result
+</ResponseField>
+
+## Tool Types
+
+### ToolDefinition
+
+Defines a tool that can be invoked during harness execution.
+
+```typescript
+interface ToolDefinition<TSchema extends z.ZodTypeAny = z.ZodTypeAny, TResult = unknown> {
+  name: string;
+  description: string;
+  schema: TSchema;
+  execute?: (input: z.infer<TSchema>, ctx: ToolContext) => Promise<ToolExecutionResult<TResult>>;
+  derivePermission?: (params: Record<string, unknown>) => ToolPermission;
+}
+```
+
+<ResponseField name="name" type="string" required>
+  Unique tool identifier
+</ResponseField>
+
+<ResponseField name="description" type="string" required>
+  Natural language description shown to the model
+</ResponseField>
+
+<ResponseField name="schema" type="z.ZodTypeAny" required>
+  Zod schema defining the tool's input parameters
+</ResponseField>
+
+<ResponseField name="execute" type="function">
+  Optional execution handler. Receives validated input and context, returns result.
+</ResponseField>
+
+<ResponseField name="derivePermission" type="function">
+  Optional function to derive permission requirements from parameters
+</ResponseField>
+
+#### Example
+
+```typescript
+import { z } from "zod";
+
+const readFileTool: ToolDefinition = {
+  name: "read_file",
+  description: "Read contents of a file",
+  schema: z.object({
+    path: z.string(),
+  }),
+  execute: async (input, ctx) => {
+    const contents = await fs.readFile(input.path, "utf-8");
+    return { context: contents };
+  },
+};
+```
+
+### ToolCall
+
+Represents a tool invocation in an assistant message.
+
+```typescript
+interface ToolCall<TSchema extends z.ZodTypeAny = z.ZodTypeAny> {
+  id: string;
+  name: string;
+  arguments?: z.infer<TSchema>;
+}
+```
+
+<ResponseField name="id" type="string" required>
+  Unique identifier for this tool call
+</ResponseField>
+
+<ResponseField name="name" type="string" required>
+  Name of the tool to invoke
+</ResponseField>
+
+<ResponseField name="arguments" type="z.infer<TSchema>">
+  Parsed tool arguments matching the tool's schema
+</ResponseField>
+
+### ToolExecutionResult
+
+Result returned from tool execution.
+
+```typescript
+interface ToolExecutionResult<T = unknown> {
+  context?: string;  // Injected into agent context window
+  result?: T;        // Available to harness/application
+}
+```
+
+<ResponseField name="context" type="string">
+  Text injected into the agent's context window (shown to the model)
+</ResponseField>
+
+<ResponseField name="result" type="T">
+  Structured result available to the harness or application
+</ResponseField>
+
+### ToolContext
+
+Context passed to tool execute functions.
+
+```typescript
+interface ToolContext {
+  parentId?: string;
+  spawn?: (task: string) => Promise<string>;
+  fileTime?: FileTime;
+}
+```
+
+<ResponseField name="parentId" type="string">
+  The tool_call ID that spawned this execution context
+</ResponseField>
+
+<ResponseField name="spawn" type="function">
+  Function to spawn subagent tasks
+</ResponseField>
+
+<ResponseField name="fileTime" type="FileTime">
+  File timestamp tracking for deterministic execution
+</ResponseField>
+
+## Permission Types
+
+### ToolPermission
+
+Defines permission rules for tool execution control.
+
+```typescript
+interface ToolPermission {
+  tool: string;
+  params?: Record<string, string>;  // param name → glob pattern
+}
+```
+
+<ResponseField name="tool" type="string" required>
+  Tool name this permission applies to
+</ResponseField>
+
+<ResponseField name="params" type="Record<string, string>">
+  Parameter constraints using glob patterns (e.g., `{"path": "src/**"}`)
+</ResponseField>
+
+### Permissions
+
+Complete permission configuration for harness invocation.
+
+```typescript
+interface Permissions {
+  allowlist?: ToolPermission[];
+  allowOnce?: ToolPermission[];
+  deny?: Array<{ toolCallId: string; reason?: string }>;
+}
+```
+
+<ResponseField name="allowlist" type="ToolPermission[]">
+  Tools always permitted without relay events
+</ResponseField>
+
+<ResponseField name="allowOnce" type="ToolPermission[]">
+  Tools permitted once, then require relay approval
+</ResponseField>
+
+<ResponseField name="deny" type="Array<{ toolCallId: string; reason?: string }>">
+  Explicitly denied tool calls with optional reasons
+</ResponseField>
+
+## Event Types
+
+### HarnessEvent
+
+Discriminated union of all events a harness can yield.
+
+```typescript
+type HarnessEvent =
+  | { type: "harness_start"; runId: string; parentId?: string; depth?: number; maxIterations?: number }
+  | { type: "harness_end"; runId: string; parentId?: string; reason?: "final" | "max_iterations"; iterations?: number; totalUsage?: { inputTokens: number; outputTokens: number } }
+  | { type: "reasoning"; runId: string; id: string; parentId?: string; content: string }
+  | { type: "text"; runId: string; id: string; parentId?: string; content: string }
+  | { type: "tool_call"; runId: string; id: string; parentId?: string; name: string; input: unknown }
+  | { type: "tool_result"; runId: string; id: string; parentId?: string; name: string; output: unknown }
+  | { type: "tool_progress"; runId: string; id: string; parentId?: string; toolCallId: string; name: string; content: unknown }
+  | { type: "repl_input"; runId: string; id: string; parentId?: string; code: string; iteration?: number }
+  | { type: "repl_progress"; runId: string; id: string; parentId?: string; chunk: string; stream: "stdout" | "stderr" }
+  | { type: "repl_output"; runId: string; id: string; parentId?: string; stdout: string; error?: string; done: boolean; iteration?: number; durationMs?: number; truncated?: boolean }
+  | { type: "usage"; runId: string; parentId?: string; inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheCreationTokens?: number }
+  | { type: "error"; runId: string; parentId?: string; error: Error }
+  | RelayEvent;
+```
+
+See the [Events Reference](/concepts/events) for detailed documentation of each event type.
+
+### RelayEvent
+
+Event requesting permission for tool execution.
+
+```typescript
+type RelayEvent = {
+  type: "relay";
+  kind: "permission";
+  runId: string;
+  id: string;
+  parentId?: string;
+  toolCallId: string;
+  tool: string;
+  params: Record<string, unknown>;
+  respond: (response: PermissionResponse) => void;
+};
+```
+
+<ResponseField name="type" type="'relay'" required>
+  Event type discriminator
+</ResponseField>
+
+<ResponseField name="kind" type="'permission'" required>
+  Relay kind (currently only permission)
+</ResponseField>
+
+<ResponseField name="runId" type="string" required>
+  Run identifier
+</ResponseField>
+
+<ResponseField name="id" type="string" required>
+  Unique event ID
+</ResponseField>
+
+<ResponseField name="parentId" type="string">
+  Parent context ID
+</ResponseField>
+
+<ResponseField name="toolCallId" type="string" required>
+  Tool call awaiting permission
+</ResponseField>
+
+<ResponseField name="tool" type="string" required>
+  Tool name
+</ResponseField>
+
+<ResponseField name="params" type="Record<string, unknown>" required>
+  Tool parameters
+</ResponseField>
+
+<ResponseField name="respond" type="function" required>
+  Callback to approve or deny the tool call
+</ResponseField>
+
+### PermissionResponse
+
+Response to a permission relay event.
+
+```typescript
+type PermissionResponse = { approved: boolean; reason?: string };
+```
+
+<ResponseField name="approved" type="boolean" required>
+  Whether the tool call is approved
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Optional explanation for approval or denial
+</ResponseField>
+
+## Harness Interface
+
+### HarnessModule
+
+Callback-based harness interface.
+
+```typescript
+interface HarnessModule {
+  invoke(params: InvokeParams): Promise<void>;
+  supportedModels(): Promise<string[]>;
+}
+```
+
+### GeneratorHarnessModule
+
+Generator-based harness interface (preferred).
+
+```typescript
+interface GeneratorHarnessModule {
+  invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent>;
+  supportedModels(): Promise<string[]>;
+}
+```
+
+### InvokeParams
+
+Parameters for callback-based harness invocation.
+
+```typescript
+interface InvokeParams {
+  model?: string;
+  messages: Message[];
+  tools?: ToolDefinition[];
+  emit: (event: HarnessEvent) => void;
+  context?: { parentId?: string };
+  permissions?: Permissions;
+}
+```
+
+<ResponseField name="model" type="string">
+  Model identifier (e.g., `"claude-3-5-sonnet-20241022"`)
+</ResponseField>
+
+<ResponseField name="messages" type="Message[]" required>
+  Conversation history
+</ResponseField>
+
+<ResponseField name="tools" type="ToolDefinition[]">
+  Available tools
+</ResponseField>
+
+<ResponseField name="emit" type="function" required>
+  Callback to emit events
+</ResponseField>
+
+<ResponseField name="context" type="object">
+  Execution context with optional parent ID
+</ResponseField>
+
+<ResponseField name="permissions" type="Permissions">
+  Permission configuration
+</ResponseField>
+
+### GeneratorInvokeParams
+
+Parameters for generator-based harness invocation.
+
+```typescript
+interface GeneratorInvokeParams {
+  model?: string;
+  messages: Message[];
+  context?: string;
+  tools?: ToolDefinition[];
+  env?: {
+    parentId?: string;
+    spawn?: (task: string, parentId: string) => Promise<string>;
+    fileTime?: FileTime;
+  };
+  permissions?: Permissions;
+}
+```
+
+<ResponseField name="model" type="string">
+  Model identifier
+</ResponseField>
+
+<ResponseField name="messages" type="Message[]" required>
+  Conversation history
+</ResponseField>
+
+<ResponseField name="context" type="string">
+  Additional context string injected into the conversation
+</ResponseField>
+
+<ResponseField name="tools" type="ToolDefinition[]">
+  Available tools
+</ResponseField>
+
+<ResponseField name="env" type="object">
+  Execution environment with spawn capability and file time tracking
+</ResponseField>
+
+<ResponseField name="permissions" type="Permissions">
+  Permission configuration
+</ResponseField>
+
+### Harness
+
+Harness metadata.
+
+```typescript
+interface Harness {
+  id: string;
+  name: string;
+  description?: string;
+  modulePath?: string;
+  supportedModels?: string[];
+  registeredAt?: number;
+}
+```
+
+<ResponseField name="id" type="string" required>
+  Unique harness identifier
+</ResponseField>
+
+<ResponseField name="name" type="string" required>
+  Human-readable harness name
+</ResponseField>
+
+<ResponseField name="description" type="string">
+  Harness description
+</ResponseField>
+
+<ResponseField name="modulePath" type="string">
+  File system path to the harness module
+</ResponseField>
+
+<ResponseField name="supportedModels" type="string[]">
+  List of supported model identifiers
+</ResponseField>
+
+<ResponseField name="registeredAt" type="number">
+  Unix timestamp of registration
+</ResponseField>
+
+### LoadedHarness
+
+A loaded harness with its module.
+
+```typescript
+interface LoadedHarness {
+  harness: Harness;
+  module: HarnessModule;
+}
+```
+
+<ResponseField name="harness" type="Harness" required>
+  Harness metadata
+</ResponseField>
+
+<ResponseField name="module" type="HarnessModule" required>
+  The loaded harness module implementation
+</ResponseField>

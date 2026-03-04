@@ -1,0 +1,449 @@
+---
+title: Recursive Language Model (RLM)
+description: Process arbitrarily long inputs by giving the model a REPL and symbolic handles to data
+---
+
+## Overview
+
+Recursive Language Models (RLM) solve a fundamental problem: LLMs have fixed context windows, but real-world inputs can be arbitrarily long. Instead of cramming the full input into the prompt, an RLM gives the model a **REPL** and a **symbolic handle** to the input. The model writes JavaScript to explore, chunk, and recursively process the data.
+
+## The Core Idea
+
+In a standard LLM call:
+
+```
+System: You are a helpful assistant.
+User: <entire 500KB document here>
+      Summarize this document.
+```
+
+In an RLM call:
+
+```
+System: You have a variable `context` (length: 512000, prefix: "Chapter 1...").
+        Write JavaScript to process it.
+User: Summarize this document.
+```
+
+The model then writes code like:
+
+```javascript
+const chunkSize = 2000;
+const summaries = [];
+
+for (let i = 0; i < context.length; i += chunkSize) {
+  const chunk = context.slice(i, i + chunkSize);
+  const summary = await llm_query("Summarize this text.", chunk);
+  summaries.push(summary);
+}
+
+FINAL(await llm_query("Combine these summaries.", summaries.join("\n")));
+```
+
+This decouples input size from context window size.
+
+## Quick Start
+
+<Steps>
+  <Step title="Create RLM Harness">
+    Wrap a provider harness with the RLM harness:
+
+    ```typescript
+    import { createRlmHarness } from "@/packages/ai/rlm/harness";
+    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+
+    const rlm = createRlmHarness({
+      rootHarness: createGeneratorHarness(),
+      config: {
+        maxIterations: 10,
+        maxStdoutLength: 4000,
+        metadataPrefixLength: 200,
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Invoke with Long Input">
+    Pass your data as the user message:
+
+    ```typescript
+    const longDocument = await Bun.file("giant-report.txt").text();
+
+    for await (const event of rlm.invoke({
+      model: "kimi-k2.5",
+      messages: [{ role: "user", content: longDocument }],
+    })) {
+      if (event.type === "text") console.log(event.content);
+    }
+    ```
+  </Step>
+
+  <Step title="Handle REPL Events">
+    Monitor the model's code execution:
+
+    ```typescript
+    for await (const event of rlm.invoke(params)) {
+      if (event.type === "repl_input") {
+        console.log("[executing]", event.code);
+      }
+      if (event.type === "repl_progress") {
+        process.stderr.write(event.chunk);
+      }
+      if (event.type === "repl_output") {
+        console.log("[stdout]", event.stdout);
+      }
+      if (event.type === "text") {
+        console.log("[answer]", event.content);
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+Configure the RLM harness behavior:
+
+```typescript
+interface RlmConfig {
+  maxIterations: number;         // Max REPL turns before stopping (default: 10)
+  maxStdoutLength: number;       // Max chars of stdout fed back per turn (default: 4000)
+  metadataPrefixLength: number;  // Length of context prefix shown to model (default: 200)
+  subPromptBudget?: number;      // Max chars for llm_query prompt arg (default: 10000)
+  subModel?: string;             // Model for llm_query calls (defaults to subHarness model)
+  maxDepth?: number;             // Max recursion depth for llm_query (default: 2)
+  execTimeout?: number;          // Default timeout for exec() calls in seconds (default: 10)
+}
+```
+
+### Choosing Values
+
+- **maxIterations**: 10 works well. Simple tasks finish in 1-3 turns, complex ones take 5-8.
+- **maxStdoutLength**: 4000 (default) prevents context overflow from debug output.
+- **metadataPrefixLength**: 200 gives enough orientation. Increase if the beginning matters.
+- **maxDepth**: 2 allows `llm_query` → child `llm_query` → flat call. Prevents infinite recursion.
+
+## The REPL Environment
+
+The model has access to:
+
+| Name | Type | Description |
+|------|------|-------------|
+| `context` | `string` | The user's input as a plain JavaScript string |
+| `llm_query(prompt, context?)` | `(string, string?) => Promise<string>` | Spawn a sub-agent with its own REPL. `prompt` is the task, `context` is optional data |
+| `exec(command, timeout?)` | `(string, number?) => Promise<{ stdout, stderr, exitCode }>` | Execute a shell command |
+| `FINAL(answer)` | `(unknown) => void` | Emit the final answer and stop |
+| `console.log(...args)` | `(...unknown[]) => void` | Print to stdout (shown back to model) |
+| `scope` | `Record<string, unknown>` | Persistent state across REPL turns |
+
+### Variables Persist
+
+Assign to `scope` to preserve state:
+
+```javascript
+// Turn 1
+scope.summaries = [];
+for (let i = 0; i < 3; i++) {
+  const chunk = context.slice(i * 1000, (i + 1) * 1000);
+  const summary = await llm_query("Summarize", chunk);
+  scope.summaries.push(summary);
+}
+console.log(`Processed ${scope.summaries.length} chunks`);
+
+// Turn 2 (model sees previous output, scope persists)
+FINAL(scope.summaries.join("\n\n"));
+```
+
+## Example: Document Summarization
+
+```typescript
+import { createRlmHarness } from "@/packages/ai/rlm/harness";
+import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  subHarness: createGeneratorHarness(), // Use cheaper model for chunks
+  config: {
+    maxIterations: 10,
+    maxStdoutLength: 4000,
+    metadataPrefixLength: 200,
+  },
+});
+
+const document = await Bun.file("long-report.txt").text();
+
+console.log(`Document length: ${document.length} chars\n`);
+
+for await (const event of rlm.invoke({
+  model: "kimi-k2.5",
+  messages: [
+    {
+      role: "user",
+      content: `${document}\n\nSummarize the key findings from this report.`,
+    },
+  ],
+})) {
+  if (event.type === "repl_input") {
+    console.log("\n[CODE]\n" + event.code);
+  }
+
+  if (event.type === "repl_progress") {
+    process.stderr.write(event.chunk);
+  }
+
+  if (event.type === "repl_output") {
+    if (event.error) {
+      console.error("\n[ERROR]", event.error);
+    } else {
+      console.log("\n[STDOUT]", event.stdout);
+    }
+  }
+
+  if (event.type === "text") {
+    console.log("\n[ANSWER]", event.content);
+  }
+}
+```
+
+## Example: Shell Command Execution
+
+The REPL includes `exec()` for running shell commands:
+
+```typescript
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  config: { maxIterations: 10 },
+});
+
+for await (const event of rlm.invoke({
+  model: "kimi-k2.5",
+  messages: [{ role: "user", content: "Find all TypeScript files and count lines of code" }],
+})) {
+  if (event.type === "repl_input") {
+    console.log("[executing]", event.code);
+  }
+
+  if (event.type === "text") {
+    console.log("[answer]", event.content);
+  }
+}
+```
+
+The model might write:
+
+```javascript
+const { stdout } = await exec('find . -name "*.ts" -type f');
+const files = stdout.trim().split('\n');
+console.log(`Found ${files.length} TypeScript files`);
+
+let totalLines = 0;
+for (const file of files) {
+  const { stdout: content } = await exec(`wc -l "${file}"`);
+  const lines = parseInt(content.trim().split(' ')[0]);
+  totalLines += lines;
+}
+
+FINAL(`Total: ${totalLines} lines across ${files.length} files`);
+```
+
+## The Inference Loop
+
+The RLM harness runs this loop:
+
+```
+1. Extract user prompt, create REPL with prompt as `context`
+2. Build system prompt (metadata only: length, prefix)
+3. Loop (up to maxIterations):
+   a. Call LLM → stream response
+   b. Extract code from fenced block
+   c. Execute in REPL
+   d. Yield repl_input, repl_progress, repl_output events
+   e. Feed stdout/error back as next user message
+   f. If FINAL() called → emit text event, break
+4. Yield harness_end
+```
+
+## Event Types
+
+| Event | Description | Fields |
+|-------|-------------|--------|
+| `harness_start` | RLM session started | `runId`, `depth?`, `maxIterations?` |
+| `text` | Streamed LLM response or final answer | `id`, `runId`, `content` |
+| `reasoning` | Streamed reasoning tokens | `id`, `runId`, `content` |
+| `repl_input` | Code about to execute | `id`, `runId`, `code`, `iteration?` |
+| `repl_progress` | Live REPL output | `id`, `runId`, `chunk`, `stream` ("stdout"/"stderr") |
+| `repl_output` | Complete execution result | `id`, `runId`, `stdout`, `error?`, `done`, `iteration?`, `durationMs?`, `truncated?` |
+| `usage` | Token usage | `runId`, `inputTokens`, `outputTokens` |
+| `error` | Error (e.g., code extraction failed) | `runId`, `message` |
+| `harness_end` | Session complete | `runId`, `reason?`, `iterations?`, `totalUsage?` |
+| `relay` | Permission request for exec() | `id`, `runId`, `kind: "permission"`, `tool: "exec"`, `params` |
+
+## Recursive Queries
+
+The `llm_query()` function spawns child RLM sessions:
+
+```javascript
+// Parent model writes:
+const intro = await llm_query("Summarize the introduction", context.slice(0, 5000));
+const methods = await llm_query("Summarize the methods section", context.slice(5000, 15000));
+const results = await llm_query("Summarize the results", context.slice(15000));
+
+FINAL(`Intro: ${intro}\n\nMethods: ${methods}\n\nResults: ${results}`);
+```
+
+Each `llm_query` call:
+1. Spawns a child RLM harness with `depth = parent.depth + 1`
+2. Gives the child its own REPL with the provided `context`
+3. Returns the child's final answer as a string
+
+Child events include `parentId` to preserve the call graph.
+
+### Depth Limits
+
+Set `maxDepth` to prevent infinite recursion:
+
+```typescript
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  config: {
+    maxIterations: 10,
+    maxDepth: 2, // depth 0 → depth 1 → depth 2 (flat call)
+  },
+});
+```
+
+At `depth >= maxDepth`, `llm_query` falls back to a flat one-shot call (no REPL).
+
+## Separate Sub-Harness
+
+Use a cheaper model for `llm_query` calls:
+
+```typescript
+const rootProvider = createGeneratorHarness(); // Expensive, smart model
+const subProvider = createGeneratorHarness();  // Cheap, fast model
+
+const rlm = createRlmHarness({
+  rootHarness: rootProvider,  // Writes REPL code
+  subHarness: subProvider,    // Handles llm_query calls
+  config: {
+    maxIterations: 10,
+    subModel: "glm-4.7", // Override model for sub-calls
+  },
+});
+```
+
+This reduces cost: the parent writes code (requires capability), but sub-calls are often simpler tasks (summarization, extraction).
+
+## Permission Gating for exec()
+
+When `permissions` are provided, `exec()` calls are checked:
+
+```typescript
+for await (const event of rlm.invoke({
+  model: "kimi-k2.5",
+  messages: [{ role: "user", content: "Find all TODO comments in the codebase" }],
+  permissions: { allowlist: [] }, // Require approval for all exec calls
+})) {
+  if (event.type === "relay" && event.kind === "permission") {
+    console.log(`\n⚠️  exec() permission required:`);
+    console.log(`   Command: ${event.params.command}`);
+
+    const approved = await askUser("Approve? (y/n) ");
+    event.respond({ approved: approved === "y" });
+  }
+
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+Without `permissions`, `exec()` runs freely (backward compatible).
+
+## Error Recovery
+
+REPL errors don't crash the session:
+
+```
+Model: undefinedVar.boom
+REPL:  error: undefinedVar is not defined
+
+Model: // Let me fix that
+       console.log(context.length)
+REPL:  512000
+
+Model: FINAL("Document is 512KB")
+```
+
+The model sees the error and can adjust its approach.
+
+## Stopping Conditions
+
+- **FINAL() called**: Model emits final answer, loop breaks
+- **maxIterations reached**: Loop stops, no final answer (handle gracefully)
+- **Error**: Yielded as `error` event, session ends
+
+## Code Extraction
+
+The harness expects exactly one code block per LLM response:
+
+````javascript
+The model writes:
+
+```javascript
+console.log(context.length);
+```
+````
+
+If multiple code blocks are present, an `error` event is yielded.
+
+## Debugging
+
+Enable logging:
+
+```typescript
+import { setLogLevel } from "@/packages/ai/logger";
+
+setLogLevel("I"); // Info level
+
+for await (const event of rlm.invoke(params)) {
+  // Logs appear on stderr:
+  // [I] <runId> rlm_iteration iter=1 max=10
+  // [I] <runId> repl_execute code_length=45
+  // [I] <runId> repl_done duration=120ms
+}
+```
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Document Processing" icon="file-text">
+    Summarize, extract, or analyze documents longer than the context window
+  </Card>
+  <Card title="Codebase Analysis" icon="code">
+    Search, refactor, or audit large codebases by chunking and delegating
+  </Card>
+  <Card title="Log Analysis" icon="list">
+    Parse and aggregate insights from massive log files
+  </Card>
+  <Card title="Data Processing" icon="database">
+    Transform, filter, or aggregate large datasets programmatically
+  </Card>
+</CardGroup>
+
+## Limitations
+
+- **Model capability**: RLM requires a model that writes correct JavaScript. Works best with capable models (GPT-4, Claude 3.5, DeepSeek, Kimi).
+- **Iteration budget**: Complex tasks may hit `maxIterations`. Increase if needed.
+- **REPL sandbox**: Limited to `AsyncFunction`. No access to `require`, `process`, or other Node/Bun globals.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Agent" icon="users" href="/guides/multi-agent">
+    Combine RLM with the orchestrator for concurrent agents
+  </Card>
+  <Card title="Client Rendering" icon="browser" href="/guides/client-rendering">
+    Render RLM events in a UI
+  </Card>
+</CardGroup>

@@ -1,0 +1,395 @@
+---
+title: POST /chat
+description: Stream chat completions with agentic tool execution
+---
+
+Create a streaming chat session with an AI agent that can execute tools and spawn subagents.
+
+## Request
+
+<ParamField path="model" type="string" required>
+  The model to use for the agent. If not provided, uses the server's default model (if configured). Format: `provider/model-name` (e.g., `openai/gpt-4o-mini`, `anthropic/claude-3-5-sonnet-20241022`)
+</ParamField>
+
+<ParamField path="messages" type="array" required>
+  Array of conversation messages following the OpenAI message format.
+  
+  Each message has:
+  - `role` - One of: `system`, `user`, `assistant`, `tool`
+  - `content` - Message content (string or array of content parts for multimodal)
+  - `tool_calls` - Tool calls made by assistant (for `assistant` role)
+  - `tool_call_id` - ID of tool call this is responding to (for `tool` role)
+</ParamField>
+
+<ParamField path="context" type="string">
+  Additional context to inject into the agent's system prompt.
+</ParamField>
+
+<ParamField path="permissions" type="object">
+  Tool execution permission rules.
+  
+  <Expandable title="properties">
+    <ParamField path="allowlist" type="array">
+      List of tool permissions that are always allowed. Each permission has:
+      - `tool` - Tool name
+      - `params` - Optional param name to glob pattern mapping
+    </ParamField>
+    
+    <ParamField path="allowOnce" type="array">
+      List of tool permissions allowed once (removed after use). Same structure as `allowlist`.
+    </ParamField>
+    
+    <ParamField path="deny" type="array">
+      List of denied tool calls with:
+      - `toolCallId` - ID of the tool call to deny
+      - `reason` - Optional reason for denial
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="mode" type="string">
+  Execution mode. Options:
+  - `agent` (default) - Standard agentic mode with tool execution
+  - `rlm` - Reasoning Loop Mode for code execution with REPL
+</ParamField>
+
+<ParamField path="maxIterations" type="number">
+  Maximum number of iterations for RLM mode (default: 10).
+</ParamField>
+
+<ParamField path="maxDepth" type="number">
+  Maximum depth for recursive agent spawning in RLM mode (default: 2).
+</ParamField>
+
+### Example Request
+
+```bash
+curl -X POST http://localhost:4000/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai/gpt-4o-mini",
+    "messages": [
+      {
+        "role": "user",
+        "content": "List files in the current directory"
+      }
+    ],
+    "permissions": {
+      "allowlist": [
+        {"tool": "bash", "params": {"command": "ls*"}}
+      ]
+    }
+  }'
+```
+
+## Response
+
+Returns a Server-Sent Event stream with `Content-Type: text/event-stream`.
+
+### Connected Event
+
+First event sent when connection is established:
+
+<ResponseField name="type" type="string">
+  Always `"connected"`
+</ResponseField>
+
+<ResponseField name="sessionId" type="string">
+  Unique session identifier for this chat. Use this for relay requests.
+</ResponseField>
+
+### Harness Start Event
+
+<ResponseField name="type" type="string">
+  Always `"harness_start"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Unique identifier for this agent run
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  ID of the agent emitting this event
+</ResponseField>
+
+<ResponseField name="parentId" type="string">
+  Parent agent or tool call ID (if this is a subagent)
+</ResponseField>
+
+<ResponseField name="depth" type="number">
+  Nesting depth for subagents
+</ResponseField>
+
+<ResponseField name="maxIterations" type="number">
+  Maximum iterations allowed
+</ResponseField>
+
+### Text Event
+
+Streamed text content from the AI:
+
+<ResponseField name="type" type="string">
+  Always `"text"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Unique event ID
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="parentId" type="string">
+  Parent context ID
+</ResponseField>
+
+<ResponseField name="content" type="string">
+  Text content chunk
+</ResponseField>
+
+### Reasoning Event
+
+Internal reasoning steps (for models that support extended thinking):
+
+<ResponseField name="type" type="string">
+  Always `"reasoning"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Unique event ID
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="content" type="string">
+  Reasoning content
+</ResponseField>
+
+### Tool Call Event
+
+Agent is invoking a tool:
+
+<ResponseField name="type" type="string">
+  Always `"tool_call"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Tool call ID (used to match with tool_result)
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Name of the tool being called
+</ResponseField>
+
+<ResponseField name="input" type="object">
+  Tool input parameters
+</ResponseField>
+
+### Tool Result Event
+
+Result from tool execution:
+
+<ResponseField name="type" type="string">
+  Always `"tool_result"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Tool call ID (matches the tool_call event)
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="name" type="string">
+  Name of the tool that was executed
+</ResponseField>
+
+<ResponseField name="output" type="any">
+  Tool output result
+</ResponseField>
+
+### Relay Event
+
+Permission request for tool execution:
+
+<ResponseField name="type" type="string">
+  Always `"relay"`
+</ResponseField>
+
+<ResponseField name="kind" type="string">
+  Always `"permission"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Relay ID (use this to resolve the relay)
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="toolCallId" type="string">
+  ID of the tool call requiring permission
+</ResponseField>
+
+<ResponseField name="tool" type="string">
+  Name of the tool requesting permission
+</ResponseField>
+
+<ResponseField name="params" type="object">
+  Tool parameters for permission review
+</ResponseField>
+
+### Usage Event
+
+Token usage information:
+
+<ResponseField name="type" type="string">
+  Always `"usage"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="inputTokens" type="number">
+  Number of input tokens used
+</ResponseField>
+
+<ResponseField name="outputTokens" type="number">
+  Number of output tokens generated
+</ResponseField>
+
+<ResponseField name="cacheReadTokens" type="number">
+  Tokens read from cache (if supported)
+</ResponseField>
+
+<ResponseField name="cacheCreationTokens" type="number">
+  Tokens used to create cache (if supported)
+</ResponseField>
+
+### Harness End Event
+
+<ResponseField name="type" type="string">
+  Always `"harness_end"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="reason" type="string">
+  Why the harness ended: `"final"` or `"max_iterations"`
+</ResponseField>
+
+<ResponseField name="iterations" type="number">
+  Number of iterations completed
+</ResponseField>
+
+<ResponseField name="totalUsage" type="object">
+  Cumulative token usage for the entire run
+</ResponseField>
+
+### Error Event
+
+<ResponseField name="type" type="string">
+  Always `"error"`
+</ResponseField>
+
+<ResponseField name="runId" type="string">
+  Run identifier (if available)
+</ResponseField>
+
+<ResponseField name="agentId" type="string">
+  Agent identifier
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Error message
+</ResponseField>
+
+### Example Response Stream
+
+```
+event: connected
+data: {"type":"connected","sessionId":"01963a5c-7890-7abc-def0-123456789abc"}
+
+event: harness_start
+data: {"type":"harness_start","runId":"01963a5c-7891-7abc-def0-123456789abc","agentId":"01963a5c-7892-7abc-def0-123456789abc"}
+
+event: text
+data: {"type":"text","runId":"01963a5c-7891-7abc-def0-123456789abc","id":"msg_1","agentId":"01963a5c-7892-7abc-def0-123456789abc","content":"I'll list the files"}
+
+event: tool_call
+data: {"type":"tool_call","runId":"01963a5c-7891-7abc-def0-123456789abc","id":"call_abc123","agentId":"01963a5c-7892-7abc-def0-123456789abc","name":"bash","input":{"command":"ls"}}
+
+event: tool_result
+data: {"type":"tool_result","runId":"01963a5c-7891-7abc-def0-123456789abc","id":"call_abc123","agentId":"01963a5c-7892-7abc-def0-123456789abc","name":"bash","output":"file1.txt\nfile2.txt"}
+
+event: harness_end
+data: {"type":"harness_end","runId":"01963a5c-7891-7abc-def0-123456789abc","agentId":"01963a5c-7892-7abc-def0-123456789abc","reason":"final","iterations":1}
+```
+
+## Error Responses
+
+### 400 Bad Request
+
+Returned when the request is malformed:
+
+```json
+{
+  "error": "Invalid JSON body"
+}
+```
+
+or
+
+```json
+{
+  "error": "model and messages are required"
+}
+```
+
+## Notes
+
+- Each POST /chat creates a fresh `AgentOrchestrator` for that session
+- The orchestrator is automatically cleaned up when the SSE stream ends
+- Default tools available: `agent` (spawn subagents), `bash`, `read`, `patch`
+- Skills are automatically discovered from configured skill directories and injected into the system prompt
+- All events after the initial `connected` event include an `agentId` field

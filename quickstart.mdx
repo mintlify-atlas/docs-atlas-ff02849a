@@ -1,80 +1,316 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get started with LLM Gateway in 5 minutes
 ---
 
-## Get started in three steps
+# Quickstart
 
-Get your documentation site running locally and make your first customization.
+Get up and running with LLM Gateway in just a few minutes. This guide will take you from installation to making your first LLM call with tools.
 
-### Step 1: Set up your local environment
+## What You'll Build
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+By the end of this quickstart, you'll have:
 
-### Step 2: Deploy your changes
+- A working LLM Gateway setup
+- Your first streaming LLM call
+- An agent that can execute shell commands
+- Understanding of how to add custom tools
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+## Prerequisites
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+- [Bun](https://bun.sh) 1.0+ installed
+- An API key from [OpenRouter](https://openrouter.ai), [Anthropic](https://anthropic.com), or [Zen](https://opencode.ai/zen)
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
 
-### Step 3: Go live
+### Install LLM Gateway
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+Clone the repository and install dependencies:
 
-## Next steps
+```bash
+git clone https://github.com/yourusername/llm-gateway.git
+cd llm-gateway
+bun install
+```
 
-Now that you have your docs running, explore these key features:
+### Configure Your Environment
+
+Copy the example environment file and add your API key:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and add your API key:
+
+```bash .env
+ZEN_API_KEY=your_api_key_here
+DEFAULT_MODEL=glm-4.7
+LOG_LEVEL=I
+```
+
+<Note>
+  You can use `OPENROUTER_API_KEY` or `ANTHROPIC_API_KEY` instead, depending on your provider.
+</Note>
+
+### Make Your First LLM Call
+
+Create a new file called `example.ts` in the root directory:
+
+```typescript example.ts
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+const harness = createGeneratorHarness();
+
+for await (const event of harness.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "What is the sum of the first 10 primes?" }],
+})) {
+  if (event.type === "reasoning") process.stderr.write(event.content); // thinking
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+Run it:
+
+```bash
+bun run example.ts
+```
+
+You should see the model's response streaming to your terminal!
+
+### Add Tool Calling
+
+Now let's create an agent that can execute shell commands. Update your `example.ts`:
+
+```typescript example.ts
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+import { bashTool } from "./packages/ai/tools";
+
+const agent = createAgentHarness({ harness: createGeneratorHarness() });
+
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "List the files in this directory" }],
+  tools: [bashTool],
+  permissions: { allowlist: [{ tool: "bash" }] },
+})) {
+  if (event.type === "reasoning") process.stderr.write(event.content);
+  if (event.type === "text") process.stdout.write(event.content);
+  if (event.type === "tool_call") console.log(`\n[calling ${event.name}]`);
+  if (event.type === "tool_result") console.log(`[result]`, event.output);
+}
+```
+
+Run it again:
+
+```bash
+bun run example.ts
+```
+
+Now the agent will call the `bash` tool to execute `ls` and use the result to answer your question!
+
+<Note>
+  The `permissions` parameter controls which tools the agent can use. Use `allowlist` for auto-approval, or omit it for human-in-the-loop approval.
+</Note>
+
+### Start the Full Server
+
+For a production setup with HTTP/SSE endpoints:
+
+```bash
+bun run dev:server
+```
+
+The server will start on `http://localhost:4000` with these endpoints:
+
+- `GET /models` - List available models
+- `POST /chat` - SSE streaming chat endpoint
+- `POST /chat/relay/:relayId` - Permission resolution endpoint
+
+</Steps>
+
+## Understanding Events
+
+LLM Gateway is built around a simple event-driven architecture. Every harness yields events as an async generator:
+
+<CodeGroup>
+
+```typescript Event Types
+// Core streaming events
+{ type: "text", content: "Hello" }           // Streamed text from the model
+{ type: "reasoning", content: "thinking..." } // Model's reasoning process
+
+// Tool execution events
+{ type: "tool_call", name: "bash", input: { command: "ls" } }
+{ type: "tool_result", output: { exitCode: 0, stdout: "..." } }
+
+// Lifecycle events
+{ type: "harness_start" }  // Agent loop begins
+{ type: "harness_end" }    // Agent loop completes
+{ type: "usage" }          // Token usage information
+
+// Permission events
+{ type: "relay", kind: "permission", tool: "bash", ... }
+```
+
+```typescript Handling Events
+for await (const event of harness.invoke(params)) {
+  switch (event.type) {
+    case "text":
+      // Stream text to user
+      process.stdout.write(event.content);
+      break;
+      
+    case "tool_call":
+      // Log tool execution
+      console.log(`[${event.name}]`, event.input);
+      break;
+      
+    case "error":
+      // Handle errors
+      console.error(event.error.message);
+      break;
+  }
+}
+```
+
+</CodeGroup>
+
+Every event includes:
+- `runId` - Which LLM call produced this event
+- `parentId` - Which run spawned this one (for subagents)
+
+## Next Steps
 
 <CardGroup cols={2}>
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
+<Card title="Add Custom Tools" icon="wrench" href="/tools/creating-tools">
+  Learn how to create your own tools for agents to use
 </Card>
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
+<Card title="Multi-Agent Systems" icon="users" href="/advanced/orchestrator">
+  Build systems with multiple concurrent agents
 </Card>
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
+<Card title="Client Integration" icon="code" href="/client/overview">
+  Build UIs that consume agent events
 </Card>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
+<Card title="API Reference" icon="book" href="/api/endpoints">
+  Explore the full HTTP API
 </Card>
 
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Common Patterns
+
+### Choosing a Provider
+
+LLM Gateway supports multiple LLM providers:
+
+```typescript
+// Zen (default, fastest, supports reasoning)
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+// Anthropic (Claude models)
+import { createGeneratorHarness } from "./packages/ai/harness/providers/anthropic";
+
+// OpenAI
+import { createGeneratorHarness } from "./packages/ai/harness/providers/openai";
+
+// OpenRouter (100+ models)
+import { createGeneratorHarness } from "./packages/ai/harness/providers/openrouter";
+```
+
+### Tool Permissions
+
+Control tool execution with fine-grained permissions:
+
+```typescript
+// Auto-approve all bash commands
+permissions: {
+  allowlist: [{ tool: "bash" }]
+}
+
+// Require approval for each tool call
+permissions: {} // No allowlist
+
+// Auto-approve specific commands only
+permissions: {
+  allowlist: [
+    { tool: "bash", params: { command: "ls **" } },
+    { tool: "bash", params: { command: "git **" } }
+  ]
+}
+
+// Explicitly deny a tool call
+permissions: {
+  deny: [{ toolCallId: "call_123", reason: "Not allowed" }]
+}
+```
+
+### Human-in-the-Loop
+
+Pause execution for human approval:
+
+```typescript
+import { AgentOrchestrator } from "./packages/ai/orchestrator";
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+import { bashTool } from "./packages/ai/tools";
+
+const orchestrator = new AgentOrchestrator(
+  createAgentHarness({ harness: createGeneratorHarness() })
+);
+
+orchestrator.spawn({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Delete all logs" }],
+  tools: [bashTool],
+  // No allowlist - will require approval
+});
+
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "relay") {
+    // Ask the user
+    const approved = await askUser(`Allow ${event.tool}?`);
+    orchestrator.resolveRelay(event.id, { approved, always: false });
+  }
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+
+<Accordion title="Error: No model specified">
+  Make sure you set `DEFAULT_MODEL` in your `.env` file or pass the `model` parameter to `invoke()`.
+</Accordion>
+
+<Accordion title="Error: API key not found">
+  Check that your `.env` file has the correct API key variable:
+  - `ZEN_API_KEY` for Zen
+  - `OPENROUTER_API_KEY` for OpenRouter
+  - `ANTHROPIC_API_KEY` for Anthropic
+</Accordion>
+
+<Accordion title="Tool execution fails silently">
+  Make sure you:
+  1. Passed `tools: [...]` to `invoke()`
+  2. Used `createAgentHarness()` not just the provider harness
+  3. Set appropriate permissions
+</Accordion>
+
+<Accordion title="Events not streaming">
+  Ensure you're using `for await` to consume the async generator:
+  ```typescript
+  for await (const event of harness.invoke(...)) {
+    // Handle events
+  }
+  ```
+</Accordion>
+
+</AccordionGroup>

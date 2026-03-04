@@ -1,0 +1,425 @@
+---
+title: Tool Calling
+description: Enable LLMs to execute tools through the agent harness with permission controls
+---
+
+## Overview
+
+The agent harness wraps any provider harness and adds an agentic loop: it calls the LLM, checks permissions on tool calls, executes approved tools, feeds results back as messages, and loops until the agent provides a final answer or hits `maxIterations`.
+
+## Quick Start
+
+<Steps>
+  <Step title="Create an Agent Harness">
+    Wrap a provider harness with the agent harness:
+
+    ```typescript
+    import { createAgentHarness } from "@/packages/ai/harness/agent";
+    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+    import { bashTool } from "@/packages/ai/tools";
+
+    const agent = createAgentHarness({
+      harness: createGeneratorHarness(),
+      maxIterations: 10,
+    });
+    ```
+  </Step>
+
+  <Step title="Provide Tools">
+    Pass tools when invoking the agent:
+
+    ```typescript
+    for await (const event of agent.invoke({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "List the files in this directory" }],
+      tools: [bashTool],
+      permissions: { allowlist: [{ tool: "bash" }] },
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+      if (event.type === "tool_call") console.log(`\n[calling ${event.name}]`);
+      if (event.type === "tool_result") console.log(`[result]`, event.output);
+    }
+    ```
+  </Step>
+
+  <Step title="Handle Events">
+    The agent harness yields additional event types:
+
+    ```typescript
+    for await (const event of agent.invoke(params)) {
+      switch (event.type) {
+        case "harness_start":
+          console.log("Agent started");
+          break;
+        case "text":
+          process.stdout.write(event.content);
+          break;
+        case "reasoning":
+          process.stderr.write(event.content);
+          break;
+        case "tool_call":
+          console.log(`\n📞 Calling ${event.name}`);
+          break;
+        case "tool_result":
+          console.log(`✅ Result: ${event.output}`);
+          break;
+        case "usage":
+          console.log(`Tokens: ${event.inputTokens} in, ${event.outputTokens} out`);
+          break;
+        case "harness_end":
+          console.log("\n✨ Agent complete");
+          break;
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Built-in Tools
+
+LLM Gateway provides four core tools:
+
+<Tabs>
+  <Tab title="bash">
+    Execute shell commands:
+
+    ```typescript
+    import { bashTool } from "@/packages/ai/tools";
+
+    for await (const event of agent.invoke({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "What files are in /tmp?" }],
+      tools: [bashTool],
+      permissions: { allowlist: [{ tool: "bash", params: { command: "ls **" } }] },
+    })) {
+      if (event.type === "tool_call" && event.name === "bash") {
+        console.log("Executing:", event.input.command);
+      }
+      if (event.type === "text") process.stdout.write(event.content);
+    }
+    ```
+
+    The bash tool returns `{ exitCode, stdout, stderr }`.
+  </Tab>
+
+  <Tab title="read">
+    Read files with line numbers:
+
+    ```typescript
+    import { readTool } from "@/packages/ai/tools";
+
+    for await (const event of agent.invoke({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Read package.json" }],
+      tools: [readTool],
+      permissions: { allowlist: [{ tool: "read" }] },
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+    }
+    ```
+
+    Supports text files (with line numbers), images (base64), and PDFs (base64).
+  </Tab>
+
+  <Tab title="patch">
+    Apply unified diff patches:
+
+    ```typescript
+    import { patchTool } from "@/packages/ai/tools";
+
+    for await (const event of agent.invoke({
+      model: "glm-4.7",
+      messages: [
+        { role: "user", content: "Add a console.log to src/index.ts" }
+      ],
+      tools: [readTool, patchTool],
+      permissions: { allowlist: [{ tool: "read" }, { tool: "patch" }] },
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+    }
+    ```
+
+    The patch tool validates hunks and checks file timestamps to prevent editing stale files.
+  </Tab>
+
+  <Tab title="agent">
+    Spawn a subagent:
+
+    ```typescript
+    import { agentTool } from "@/packages/ai/tools";
+
+    for await (const event of agent.invoke({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Refactor the auth module" }],
+      tools: [bashTool, readTool, patchTool, agentTool],
+      permissions: { allowlist: [{ tool: "agent" }] },
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+      if (event.parentId) {
+        // This event is from a subagent
+        console.log(`\n[subagent ${event.runId}]`, event.type);
+      }
+    }
+    ```
+
+    Subagent events include `parentId` to form the call graph.
+  </Tab>
+</Tabs>
+
+## The Agentic Loop
+
+The agent harness runs this loop:
+
+```
+1. Call provider harness with current messages
+2. Collect tool calls from the response
+3. If no tool calls → done, return
+4. For each tool call:
+   - Check permissions (allowlist, deny, relay)
+   - Execute approved tools concurrently
+   - Append tool results to messages as "tool" role
+5. Increment iteration counter
+6. If iterations > maxIterations → force summary turn
+7. Go to step 1
+```
+
+From the outside, it's still just `invoke() → AsyncIterable<HarnessEvent>`. The consumer doesn't know how many LLM calls happened internally.
+
+## Permissions
+
+Tool execution is gated by glob-pattern matching:
+
+```typescript
+interface Permissions {
+  allowlist?: ToolPermission[];  // Auto-approve matches
+  allowOnce?: ToolPermission[];  // Approve once, consumed on match
+  deny?: ToolPermission[];       // Immediate rejection
+}
+
+interface ToolPermission {
+  tool: string;                  // Tool name or glob pattern
+  params?: Record<string, any>;  // Optional parameter matchers
+}
+```
+
+### Allow all bash commands
+
+```typescript
+permissions: {
+  allowlist: [{ tool: "bash" }]
+}
+```
+
+### Allow specific command patterns
+
+```typescript
+permissions: {
+  allowlist: [
+    { tool: "bash", params: { command: "ls **" } },
+    { tool: "bash", params: { command: "cat **" } },
+  ]
+}
+```
+
+### Deny dangerous operations
+
+```typescript
+permissions: {
+  deny: [
+    { tool: "bash", params: { command: "rm **" } },
+    { tool: "bash", params: { command: "sudo **" } },
+  ],
+  allowlist: [{ tool: "bash" }]
+}
+```
+
+### One-time approvals
+
+```typescript
+permissions: {
+  allowOnce: [{ tool: "bash", params: { command: "git push" } }],
+  allowlist: [{ tool: "bash" }]
+}
+```
+
+The first `git push` auto-approves, subsequent calls require relay approval.
+
+## Human-in-the-Loop
+
+When a tool call doesn't match any permission rule, the agent pauses and yields a `relay` event:
+
+```typescript
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Delete old logs" }],
+  tools: [bashTool],
+  permissions: { allowlist: [] }, // Require approval for everything
+})) {
+  if (event.type === "relay") {
+    console.log(`\n⚠️  Permission required:`);
+    console.log(`   Tool: ${event.tool}`);
+    console.log(`   Params:`, event.params);
+
+    // The relay event has a respond() callback
+    const approved = await askUser(`Approve? (y/n) `);
+    event.respond({ approved: approved === "y" });
+  }
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+For server-side usage with the orchestrator, see [Human-in-the-Loop](/guides/human-in-the-loop).
+
+## Custom Tools
+
+Define your own tools:
+
+```typescript
+import { z } from "zod";
+import type { ToolDefinition } from "@/packages/ai/types";
+
+const weatherTool: ToolDefinition = {
+  name: "get_weather",
+  description: "Get current weather for a location",
+  schema: z.object({
+    location: z.string().describe("City name"),
+    units: z.enum(["celsius", "fahrenheit"]).default("celsius"),
+  }),
+  execute: async ({ location, units }) => {
+    const data = await fetchWeatherAPI(location, units);
+    return {
+      context: `Weather in ${location}: ${data.temp}°${units === "celsius" ? "C" : "F"}, ${data.condition}`,
+      result: data,
+    };
+  },
+};
+
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "What's the weather in Tokyo?" }],
+  tools: [weatherTool],
+  permissions: { allowlist: [{ tool: "get_weather" }] },
+})) {
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+### Tool Execution Result
+
+The `execute` function returns:
+
+```typescript
+{
+  context: string;    // Injected into agent's conversation (what it "sees")
+  result: unknown;    // Programmatic return value (available to harness)
+}
+```
+
+### Permission Derivation
+
+Implement `derivePermission` to enable "always allow":
+
+```typescript
+const weatherTool: ToolDefinition = {
+  // ...
+  derivePermission: (params) => ({
+    tool: "get_weather",
+    params: { location: params.location },
+  }),
+};
+```
+
+When the user approves with "always", the orchestrator adds the derived permission to the allowlist.
+
+## Tool Context
+
+Tools receive a context object with useful metadata:
+
+```typescript
+interface ToolContext {
+  parentId?: string;           // Parent run ID (for provenance)
+  spawn?: SpawnFn;             // Spawn subagent function
+  fileTime?: FileTime;         // File timestamp tracker
+}
+```
+
+Example using `spawn`:
+
+```typescript
+const researchTool: ToolDefinition = {
+  name: "research",
+  description: "Research a topic using a subagent",
+  schema: z.object({
+    topic: z.string(),
+  }),
+  execute: async ({ topic }, ctx) => {
+    if (!ctx.spawn) {
+      return { context: "Spawn not available", result: null };
+    }
+
+    let answer = "";
+    for await (const event of ctx.spawn({
+      task: `Research ${topic} and summarize key findings`,
+    })) {
+      if (event.type === "text") answer += event.content;
+    }
+
+    return { context: answer, result: { topic, answer } };
+  },
+};
+```
+
+## Concurrent Tool Execution
+
+The agent harness executes multiple tool calls concurrently when the LLM requests them in the same turn:
+
+```typescript
+// If the model calls both tools in one response:
+// 1. bash: "ls /tmp"
+// 2. bash: "ps aux"
+
+// Both execute in parallel, then results are fed back together
+```
+
+This reduces total latency for independent operations.
+
+## Iteration Limits
+
+Set `maxIterations` to prevent infinite loops:
+
+```typescript
+const agent = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 5,  // Stop after 5 tool-calling rounds
+});
+```
+
+When the limit is reached, the agent gets one final turn with an empty tool list and a system message asking it to summarize.
+
+## Debugging
+
+Enable logging to trace the agentic loop:
+
+```typescript
+import { setLogLevel } from "@/packages/ai/logger";
+
+setLogLevel("I"); // Info level
+
+for await (const event of agent.invoke(params)) {
+  // Logs appear on stderr:
+  // [I] <runId> loop_iter iter=1 max=10
+  // [I] <runId> llm_call_start model=glm-4.7
+  // [I] <runId> tool_exec_start tool=bash count=1
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Multi-Agent" icon="users" href="/guides/multi-agent">
+    Orchestrate multiple concurrent agents
+  </Card>
+  <Card title="Human-in-the-Loop" icon="hand" href="/guides/human-in-the-loop">
+    Add permission approval flows
+  </Card>
+</CardGroup>

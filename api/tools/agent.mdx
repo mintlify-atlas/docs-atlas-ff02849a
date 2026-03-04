@@ -1,0 +1,168 @@
+---
+title: "agent"
+description: "Spawn autonomous subagents to handle tasks independently"
+---
+
+## Overview
+
+The `agent` tool enables hierarchical agent architectures by spawning subagents that work autonomously to complete tasks. Subagents have access to the same tool set as their parent and return their final response upon completion.
+
+## Tool Definition
+
+<ParamField path="task" type="string" required>
+  The task description for the subagent to perform. Should be clear and specific enough for the subagent to work independently.
+</ParamField>
+
+## Return Value
+
+Returns a string containing the subagent's final assistant response after completing the task.
+
+## Behavior
+
+### Subagent Lifecycle
+
+1. Parent agent calls the `agent` tool with a task description
+2. System spawns a new agent instance with the same tool access
+3. Subagent works autonomously using its tools to complete the task
+4. Subagent returns its final response
+5. Parent agent receives the result as the tool's return value
+
+### Context Requirements
+
+The tool requires a `spawn` function in the tool context. If `ctx.spawn` is not available, the tool throws an error:
+
+```
+spawn not available in tool context
+```
+
+### Tool Access
+
+Subagents inherit the same tool permissions and capabilities as their parent, enabling them to:
+- Execute shell commands via `bash`
+- Read files via `read`
+- Apply patches via `patch`
+- Spawn their own subagents (nested hierarchy)
+
+## Usage Examples
+
+### Delegating Research Tasks
+
+```typescript
+import { agentTool } from "@llm-gateway/ai/tools";
+
+const result = await agentTool.execute(
+  {
+    task: "Research the current version of React in package.json and summarize its key features"
+  },
+  ctx
+);
+
+// result.result contains the subagent's findings
+```
+
+### Complex Multi-Step Operations
+
+```typescript
+const result = await agentTool.execute(
+  {
+    task: "Analyze all TypeScript files in src/, identify unused exports, and create a report"
+  },
+  ctx
+);
+```
+
+### Parallel Work Distribution
+
+```typescript
+// Parent agent can spawn multiple subagents for parallel work
+const [testResults, lintResults, buildResults] = await Promise.all([
+  agentTool.execute({ task: "Run the test suite and analyze failures" }, ctx),
+  agentTool.execute({ task: "Run linter and categorize issues by severity" }, ctx),
+  agentTool.execute({ task: "Attempt build and identify compilation errors" }, ctx),
+]);
+```
+
+### Nested Subagent Hierarchies
+
+```typescript
+// Subagents can spawn their own subagents
+const result = await agentTool.execute(
+  {
+    task: "Refactor the authentication module by spawning subagents for each component"
+  },
+  ctx
+);
+
+// The spawned subagent might internally spawn additional subagents
+// for login.ts, signup.ts, password-reset.ts, etc.
+```
+
+## Implementation Details
+
+The tool is defined in `packages/ai/tools/agent.ts` and relies on the orchestrator's spawn mechanism.
+
+### Schema Definition
+
+```typescript
+const schema = z.object({
+  task: z.string().describe("The task for the subagent to perform"),
+});
+```
+
+### Execute Function
+
+```typescript
+execute: async ({ task }, ctx) => {
+  if (!ctx.spawn) {
+    throw new Error("spawn not available in tool context");
+  }
+  const result = await ctx.spawn(task);
+  return { context: result, result };
+}
+```
+
+The execute function:
+1. Validates that `ctx.spawn` is available
+2. Calls `ctx.spawn(task)` to create and run the subagent
+3. Waits for the subagent to complete
+4. Returns the subagent's final response as both context and result
+
+## Architecture Considerations
+
+### When to Use Subagents
+
+Good use cases:
+- Complex tasks that can be isolated
+- Tasks requiring multiple tool invocations
+- Parallel work distribution
+- Specialized analysis or research
+
+Avoid for:
+- Simple single-tool operations
+- Tasks requiring shared state with parent
+- Operations where coordination overhead exceeds task complexity
+
+### Graph Structure
+
+Subagent events are integrated into the conversation graph as described in `docs/subagents.md`. The graph maintains parent-child relationships through:
+- Chunk nodes for subagent boundaries
+- Block nodes for tool calls and responses
+- Message nodes for conversation history
+
+### Error Handling
+
+If a subagent encounters an error:
+- The error is included in the subagent's final response
+- Parent agent receives the error context and can handle appropriately
+- The conversation graph captures the full error trace
+
+## Related Tools
+
+- [bash](/api/tools/bash) - Execute shell commands (available to subagents)
+- [read](/api/tools/read) - Read files (available to subagents)
+- [patch](/api/tools/patch) - Apply patches (available to subagents)
+
+## Related Documentation
+
+- [Multi-Agent Guide](/guides/multi-agent) - Orchestrator and subagent coordination
+- [Tool Context Types](/api/types) - ToolContext interface and spawn function

@@ -1,0 +1,526 @@
+---
+title: Client-Side Rendering
+description: Transform event streams into UI views using the graph projection system
+---
+
+## Overview
+
+LLM Gateway provides a client-side state management system that transforms flat event streams into a conversation graph, then projects that graph into different view formats. This architecture separates event collection from rendering, enabling efficient UI updates and multiple simultaneous views (chat thread, token usage, DAG visualization).
+
+## Architecture
+
+```
+SSE events → reduceConversation() → ConversationGraph → projections → UI
+```
+
+<Steps>
+  <Step title="Events Arrive">
+    Events stream from the server via SSE:
+
+    ```typescript
+    import { createSSETransport } from "@/packages/ai/client";
+
+    const sse = createSSETransport({ baseUrl: "/api" });
+
+    for await (const event of sse.stream({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Hello" }],
+    })) {
+      // event: { type: "text", content: "...", runId: "...", ... }
+    }
+    ```
+  </Step>
+
+  <Step title="Reduce into Graph">
+    Each event is reduced into an immutable graph:
+
+    ```typescript
+    import {
+      createInitialConversation,
+      reduceConversation,
+    } from "@/packages/ai/client";
+
+    let state = createInitialConversation();
+
+    for await (const event of sse.stream(request)) {
+      state = reduceConversation(state, event);
+      // state.graph contains all events as a directed acyclic graph
+    }
+    ```
+  </Step>
+
+  <Step title="Project to Views">
+    Transform the graph into view-specific formats:
+
+    ```typescript
+    import { projectThread } from "@/packages/ai/client";
+
+    const view = projectThread(state.graph);
+    // view: ViewNode[] — flat list of chat messages with nested branches
+    ```
+  </Step>
+
+  <Step title="Render UI">
+    Render the view in your framework:
+
+    ```typescript
+    // React example
+    view.map((node) => (
+      <div key={node.id}>
+        {node.content.kind === "text" && <p>{node.content.text}</p>}
+        {node.content.kind === "tool_call" && (
+          <ToolCall name={node.content.name} input={node.content.input} />
+        )}
+      </div>
+    ));
+    ```
+  </Step>
+</Steps>
+
+## Complete Example
+
+<Tabs>
+  <Tab title="React">
+    ```typescript
+    import { useState, useEffect } from "react";
+    import {
+      createSSETransport,
+      createHTTPTransport,
+      createInitialConversation,
+      reduceConversation,
+      projectThread,
+      type ViewNode,
+    } from "@/packages/ai/client";
+
+    const sse = createSSETransport({ baseUrl: "/api" });
+    const http = createHTTPTransport({ baseUrl: "/api" });
+
+    function ChatInterface() {
+      const [view, setView] = useState<ViewNode[]>([]);
+      const [sessionId, setSessionId] = useState<string | null>(null);
+
+      const sendMessage = async (content: string) => {
+        let state = createInitialConversation();
+
+        for await (const event of sse.stream({
+          model: "glm-4.7",
+          messages: [{ role: "user", content }],
+        })) {
+          if (event.type === "connected") {
+            setSessionId(event.sessionId);
+          }
+
+          state = reduceConversation(state, event);
+          const newView = projectThread(state.graph);
+          setView(newView);
+
+          if (event.type === "relay" && sessionId) {
+            // Handle permission relay
+            await http.resolveRelay(sessionId, event.id, { approved: true });
+          }
+        }
+      };
+
+      return (
+        <div>
+          <div className="messages">
+            {view.map((node) => (
+              <Message key={node.id} node={node} />
+            ))}
+          </div>
+          <input
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                sendMessage(e.currentTarget.value);
+                e.currentTarget.value = "";
+              }
+            }}
+          />
+        </div>
+      );
+    }
+
+    function Message({ node }: { node: ViewNode }) {
+      const { content, status, branches } = node;
+
+      return (
+        <div className={`message ${node.role} ${status}`}>
+          {content.kind === "text" && <p>{content.text}</p>}
+
+          {content.kind === "reasoning" && (
+            <div className="reasoning">{content.text}</div>
+          )}
+
+          {content.kind === "tool_call" && (
+            <div className="tool-call">
+              <strong>{content.name}</strong>
+              <pre>{JSON.stringify(content.input, null, 2)}</pre>
+              {content.output && (
+                <div className="output">{String(content.output)}</div>
+              )}
+            </div>
+          )}
+
+          {content.kind === "user" && <p>{String(content.content)}</p>}
+
+          {content.kind === "error" && (
+            <div className="error">{content.message}</div>
+          )}
+
+          {branches.length > 0 && (
+            <div className="branches">
+              {branches.map((branch, i) => (
+                <div key={i} className="branch">
+                  {branch.map((subNode) => (
+                    <Message key={subNode.id} node={subNode} />
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+    ```
+  </Tab>
+
+  <Tab title="Vue">
+    ```vue
+    <script setup lang="ts">
+    import { ref } from "vue";
+    import {
+      createSSETransport,
+      createHTTPTransport,
+      createInitialConversation,
+      reduceConversation,
+      projectThread,
+      type ViewNode,
+    } from "@/packages/ai/client";
+
+    const sse = createSSETransport({ baseUrl: "/api" });
+    const http = createHTTPTransport({ baseUrl: "/api" });
+
+    const view = ref<ViewNode[]>([]);
+    const sessionId = ref<string | null>(null);
+    const input = ref("");
+
+    const sendMessage = async () => {
+      const content = input.value;
+      input.value = "";
+
+      let state = createInitialConversation();
+
+      for await (const event of sse.stream({
+        model: "glm-4.7",
+        messages: [{ role: "user", content }],
+      })) {
+        if (event.type === "connected") {
+          sessionId.value = event.sessionId;
+        }
+
+        state = reduceConversation(state, event);
+        view.value = projectThread(state.graph);
+
+        if (event.type === "relay" && sessionId.value) {
+          await http.resolveRelay(sessionId.value, event.id, { approved: true });
+        }
+      }
+    };
+    </script>
+
+    <template>
+      <div>
+        <div class="messages">
+          <Message v-for="node in view" :key="node.id" :node="node" />
+        </div>
+        <input v-model="input" @keydown.enter="sendMessage" />
+      </div>
+    </template>
+    ```
+  </Tab>
+
+  <Tab title="Svelte">
+    ```svelte
+    <script lang="ts">
+    import {
+      createSSETransport,
+      createHTTPTransport,
+      createInitialConversation,
+      reduceConversation,
+      projectThread,
+      type ViewNode,
+    } from "@/packages/ai/client";
+
+    const sse = createSSETransport({ baseUrl: "/api" });
+    const http = createHTTPTransport({ baseUrl: "/api" });
+
+    let view: ViewNode[] = [];
+    let sessionId: string | null = null;
+    let input = "";
+
+    async function sendMessage() {
+      const content = input;
+      input = "";
+
+      let state = createInitialConversation();
+
+      for await (const event of sse.stream({
+        model: "glm-4.7",
+        messages: [{ role: "user", content }],
+      })) {
+        if (event.type === "connected") {
+          sessionId = event.sessionId;
+        }
+
+        state = reduceConversation(state, event);
+        view = projectThread(state.graph);
+
+        if (event.type === "relay" && sessionId) {
+          await http.resolveRelay(sessionId, event.id, { approved: true });
+        }
+      }
+    }
+    </script>
+
+    <div>
+      <div class="messages">
+        {#each view as node (node.id)}
+          <Message {node} />
+        {/each}
+      </div>
+      <input bind:value={input} on:keydown={(e) => e.key === 'Enter' && sendMessage()} />
+    </div>
+    ```
+  </Tab>
+</Tabs>
+
+## ViewNode Structure
+
+The `projectThread` projection produces a flat array of `ViewNode`s:
+
+```typescript
+interface ViewNode {
+  id: string;                    // Unique node ID
+  runId: string;                 // Which run produced this
+  role: "user" | "assistant";   // Message role
+  content: ViewContent;          // The content (see below)
+  status: "streaming" | "complete" | "error"; // Current state
+  branches: ViewNode[][];        // Nested subagent runs
+}
+```
+
+### ViewContent Types
+
+```typescript
+type ViewContent =
+  | { kind: "text"; text: string }
+  | { kind: "reasoning"; text: string }
+  | { kind: "tool_call"; name: string; input: unknown; output?: unknown; progress?: unknown }
+  | { kind: "user"; content: string | ContentPart[] }
+  | { kind: "error"; message: string }
+  | { kind: "pending" }
+  | { kind: "relay"; relayKind: "permission"; toolCallId: string; tool: string; params: Record<string, unknown> };
+```
+
+## Rendering Patterns
+
+### Streaming Indicators
+
+Use `status` to show loading states:
+
+```typescript
+function Message({ node }: { node: ViewNode }) {
+  return (
+    <div className={`message ${node.status}`}>
+      {node.content.kind === "text" && <p>{node.content.text}</p>}
+      {node.status === "streaming" && <span className="cursor">▊</span>}
+    </div>
+  );
+}
+```
+
+### Tool Progress
+
+Render incremental tool output:
+
+```typescript
+{content.kind === "tool_call" && (
+  <div className="tool-call">
+    <strong>{content.name}</strong>
+    {content.progress && (
+      <div className="progress">
+        {content.progress.stdout && <pre>{content.progress.stdout}</pre>}
+        {content.progress.stderr && <pre className="stderr">{content.progress.stderr}</pre>}
+      </div>
+    )}
+    {content.output && <pre>{String(content.output)}</pre>}
+  </div>
+)}
+```
+
+### Nested Branches
+
+Render subagent runs recursively:
+
+```typescript
+function Message({ node }: { node: ViewNode }) {
+  return (
+    <div className="message">
+      {/* Main content */}
+      <MessageContent content={node.content} />
+
+      {/* Subagent branches */}
+      {node.branches.map((branch, i) => (
+        <div key={i} className="branch">
+          <div className="branch-label">Subagent {i + 1}</div>
+          {branch.map((subNode) => (
+            <Message key={subNode.id} node={subNode} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+### Pending States
+
+Show placeholders for streaming subagents:
+
+```typescript
+{content.kind === "pending" && (
+  <div className="pending">
+    <Spinner /> Starting subagent...
+  </div>
+)}
+```
+
+## Conversation State
+
+The `ConversationState` includes metadata beyond the graph:
+
+```typescript
+interface ConversationState {
+  graph: ConversationGraph;        // Event graph
+  sessionId: string | null;        // Session ID from server
+  connected: boolean;              // Connection status
+  pendingRelays: PendingRelay[];   // Unresolved permission requests
+  activeSet: Set<string>;          // Currently visible message IDs
+}
+```
+
+### Handling Relays
+
+Access pending relays from state:
+
+```typescript
+let state = createInitialConversation();
+
+for await (const event of sse.stream(request)) {
+  state = reduceConversation(state, event);
+
+  // Check for new relays
+  for (const relay of state.pendingRelays) {
+    console.log(`Relay ${relay.relayId}: ${relay.tool}`);
+
+    // Resolve via HTTP
+    await http.resolveRelay(state.sessionId!, relay.relayId, { approved: true });
+  }
+
+  // Update UI
+  setView(projectThread(state.graph));
+}
+```
+
+## Other Projections
+
+### Messages Projection
+
+Convert to LLM API format for follow-up requests:
+
+```typescript
+import { projectMessages } from "@/packages/ai/client";
+
+const messages = projectMessages(state.graph);
+// messages: Message[] — ready for next API call
+
+// Add user input
+messages.push({ role: "user", content: "Follow-up question" });
+
+for await (const event of sse.stream({ model: "glm-4.7", messages })) {
+  state = reduceConversation(state, event);
+}
+```
+
+### DAG Projection
+
+Visualize the event graph:
+
+```typescript
+import { projectDAG } from "@/packages/ai/client/hypergraph/projections/dag";
+
+const dag = projectDAG(state.graph);
+// dag: { nodes: DAGNode[], edges: DAGEdge[], groups: DAGGroup[] }
+
+// Render as SVG
+<svg width="800" height="600">
+  {dag.nodes.map((node) => (
+    <rect
+      key={node.id}
+      x={node.x}
+      y={node.y}
+      width={node.width}
+      height={node.height}
+      fill={nodeColor(node.type)}
+    />
+  ))}
+  {dag.edges.map((edge) => (
+    <line
+      key={edge.id}
+      x1={edge.x1}
+      y1={edge.y1}
+      x2={edge.x2}
+      y2={edge.y2}
+      stroke="#999"
+    />
+  ))}
+</svg>
+```
+
+## Progressive Enhancement
+
+Render immediately, enhance with streaming:
+
+```typescript
+// Server-side render initial state
+const initialView = projectThread(serverState.graph);
+
+// Hydrate on client
+let state = serverState;
+
+for await (const event of sse.stream(request)) {
+  state = reduceConversation(state, event);
+  setView(projectThread(state.graph));
+}
+```
+
+## Performance
+
+The graph reducer is optimized for streaming:
+
+- **O(1) event reduction**: Each event adds constant nodes/edges
+- **Immutable updates**: Old state remains valid for diffing
+- **Efficient projections**: Walk only the active set, not the full graph
+
+For large conversations (1000+ events), consider pagination or summarization.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Recursive Language Model" icon="code" href="/guides/recursive-language-model">
+    Process arbitrarily long inputs with RLM
+  </Card>
+  <Card title="Client Library API" icon="book" href="/api/client/conversation">
+    Full client API documentation
+  </Card>
+</CardGroup>

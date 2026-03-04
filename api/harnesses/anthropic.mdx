@@ -1,0 +1,277 @@
+---
+title: Anthropic Harness
+description: Provider harness for Anthropic Messages API with extended thinking support
+---
+
+## Overview
+
+The Anthropic harness provides direct integration with Anthropic's Messages API. It supports Claude's extended thinking feature for models like Claude Sonnet 4.5 and Claude 3.7 Sonnet.
+
+## Import
+
+```typescript
+import { createGeneratorHarness, anthropicHarness } from "@llm-gateway/ai/harness/providers/anthropic";
+```
+
+## Function Signature
+
+```typescript
+function createGeneratorHarness(
+  apiKeyOrOptions?: string | AnthropicHarnessOptions
+): GeneratorHarnessModule
+```
+
+### Parameters
+
+<ParamField path="apiKeyOrOptions" type="string | AnthropicHarnessOptions">
+  API key string or configuration object
+  
+  <ParamField path="apiKey" type="string">
+    Anthropic API key. Falls back to `ANTHROPIC_API_KEY` environment variable
+  </ParamField>
+  
+  <ParamField path="model" type="string">
+    Default model to use if not specified at invoke time
+  </ParamField>
+</ParamField>
+
+### Returns
+
+<ResponseField name="GeneratorHarnessModule" type="object">
+  A harness module with `invoke()` and `supportedModels()` methods
+</ResponseField>
+
+## What It Does
+
+The Anthropic harness makes single LLM API calls and yields events for:
+
+- **reasoning**: Streamed thinking content (for supported models)
+- **text**: Streamed text content
+- **tool_call**: Tool use from the model
+- **error**: Any errors that occur
+
+It does NOT:
+- Execute tools (that's the agent wrapper's job)
+- Handle permissions (that's the agent wrapper's job)
+- Loop after tool calls (that's the agent wrapper's job)
+
+## Basic Example
+
+```typescript
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/anthropic";
+
+// Create with API key
+const harness = createGeneratorHarness({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  model: "claude-sonnet-4-20250514",
+});
+
+// Make a single LLM call
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Using the Singleton
+
+```typescript
+import { anthropicHarness } from "@llm-gateway/ai/harness/providers/anthropic";
+
+// Use pre-configured singleton (reads ANTHROPIC_API_KEY from env)
+for await (const event of anthropicHarness.invoke({
+  model: "claude-opus-4-20250514",
+  messages: [{ role: "user", content: "Explain quantum computing" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Extended Thinking
+
+Claude Sonnet 4.5 and Claude 3.7 Sonnet support extended thinking:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-5-20250929",
+  messages: [{ role: "user", content: "Solve this complex problem..." }],
+})) {
+  if (event.type === "reasoning") {
+    console.log("[Thinking]", event.content);
+  }
+  if (event.type === "text") {
+    console.log("[Answer]", event.content);
+  }
+}
+```
+
+Thinking-enabled models automatically receive:
+- Higher max tokens (16000 vs 4096)
+- Thinking budget of 8000 tokens
+
+## With Tools
+
+```typescript
+import { z } from "zod";
+
+const tools = [
+  {
+    name: "search",
+    description: "Search the web for information",
+    schema: z.object({
+      query: z.string(),
+    }),
+  },
+];
+
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "What are the latest AI developments?" }],
+  tools,
+})) {
+  if (event.type === "tool_call") {
+    console.log(`Tool: ${event.name}`);
+    console.log(`Input:`, event.input);
+  }
+}
+```
+
+## System Messages
+
+System messages are automatically extracted and passed to Anthropic's system parameter:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [
+    { role: "system", content: "You are a helpful coding assistant" },
+    { role: "user", content: "Write a Python function to sort a list" },
+  ],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Multimodal Support
+
+Supports images and PDF documents:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Analyze this document" },
+        {
+          type: "document",
+          mediaType: "application/pdf",
+          data: base64PdfData,
+        },
+      ],
+    },
+  ],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Tool Result Format
+
+Tool results are automatically batched into user messages:
+
+```typescript
+// This message structure:
+[
+  { role: "assistant", tool_calls: [{ id: "1", name: "search", arguments: {...} }] },
+  { role: "tool", tool_call_id: "1", content: "Result 1" },
+  { role: "tool", tool_call_id: "2", content: "Result 2" },
+]
+
+// Becomes:
+[
+  { role: "assistant", content: [{ type: "tool_use", ... }] },
+  { role: "user", content: [
+    { type: "tool_result", tool_use_id: "1", content: "Result 1" },
+    { type: "tool_result", tool_use_id: "2", content: "Result 2" },
+  ]},
+]
+```
+
+## List Available Models
+
+```typescript
+const models = await harness.supportedModels();
+console.log("Available models:", models);
+// Dynamically fetches from Anthropic API or falls back to known models
+```
+
+## Wrapping with Agent Harness
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/anthropic";
+
+// Wrap Anthropic provider with agent capabilities
+const agent = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 10,
+});
+
+// Now supports tool execution and looping
+for await (const event of agent.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Research and summarize AI news" }],
+  tools: [searchTool, readTool],
+})) {
+  console.log(event);
+}
+```
+
+## Error Handling
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "error") {
+    console.error("Error:", event.error.message);
+  }
+}
+```
+
+## Thinking-Enabled Models
+
+These models automatically get extended thinking enabled:
+
+- `claude-sonnet-4-5-20250929`
+- `claude-3-7-sonnet-20250219`
+
+Other models use standard inference without thinking blocks.
+
+## Architecture Notes
+
+- Uses Anthropic SDK for streaming
+- Tracks tool calls by content block index
+- Handles thinking deltas separately from text deltas
+- Automatically converts between message formats
+- Single iteration only - compose with agent harness for loops
+
+## Related
+
+- [Agent Harness](/api/harnesses/agent) - Wrap provider with agentic capabilities
+- [Zen Harness](/api/harnesses/zen) - OpenAI-compatible provider
+- [OpenAI Harness](/api/harnesses/openai) - OpenAI native API
+- [OpenRouter Harness](/api/harnesses/openrouter) - Multi-provider aggregator

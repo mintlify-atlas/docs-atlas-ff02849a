@@ -1,0 +1,443 @@
+---
+title: Configuration
+description: Advanced configuration options for customizing your LLM Gateway server
+---
+
+## Overview
+
+The LLM Gateway server is highly configurable through the `createApp` factory function. This guide covers advanced configuration options for harnesses, tools, models, and skills.
+
+## Application Configuration
+
+The `createApp` function accepts an optional `AppConfig` object:
+
+```typescript
+interface AppConfig {
+  harness?: GeneratorHarnessModule;
+  providerHarness?: GeneratorHarnessModule;
+  tools?: ToolDefinition[];
+  defaultModel?: string;
+  skillDirs?: string[];
+}
+```
+
+## Harness Configuration
+
+### Provider Harnesses
+
+Provider harnesses handle communication with AI providers. The gateway includes built-in support for multiple providers:
+
+<Tabs>
+  <Tab title="Zen (Default)">
+    ```typescript
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+    
+    const app = await createApp({
+      harness: createAgentHarness({
+        harness: createGeneratorHarness()
+      })
+    });
+    ```
+    
+    Requires `ZEN_API_KEY` in environment.
+  </Tab>
+  
+  <Tab title="Anthropic">
+    ```typescript
+    import { createAnthropicHarness } from "./packages/ai/harness/providers/anthropic";
+    
+    const app = await createApp({
+      harness: createAgentHarness({
+        harness: createAnthropicHarness()
+      })
+    });
+    ```
+    
+    Requires `ANTHROPIC_API_KEY` in environment.
+  </Tab>
+  
+  <Tab title="OpenAI">
+    ```typescript
+    import { createOpenAIHarness } from "./packages/ai/harness/providers/openai";
+    
+    const app = await createApp({
+      harness: createAgentHarness({
+        harness: createOpenAIHarness()
+      })
+    });
+    ```
+    
+    Requires `OPENAI_API_KEY` in environment.
+  </Tab>
+  
+  <Tab title="OpenRouter">
+    ```typescript
+    import { createOpenRouterHarness } from "./packages/ai/harness/providers/openrouter";
+    
+    const app = await createApp({
+      harness: createAgentHarness({
+        harness: createOpenRouterHarness()
+      })
+    });
+    ```
+    
+    Requires `OPENROUTER_API_KEY` in environment.
+  </Tab>
+</Tabs>
+
+### Agent Harness
+
+The agent harness wraps a provider harness with tool-calling capabilities:
+
+```typescript
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+const agent = createAgentHarness({
+  harness: createGeneratorHarness(),
+  // Optional: additional agent configuration
+});
+
+const app = await createApp({ harness: agent });
+```
+
+<Info>
+The agent harness handles tool execution, permissions, and the agentic loop automatically.
+</Info>
+
+### Recursive Language Model (RLM)
+
+For processing long inputs, use the RLM harness:
+
+```typescript
+import { createRlmHarness } from "./packages/ai/rlm/harness";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  subHarness: createGeneratorHarness(), // Can use cheaper model
+  config: {
+    maxIterations: 10,
+    maxStdoutLength: 4000,
+    metadataPrefixLength: 200,
+    maxDepth: 2,
+  },
+});
+
+const app = await createApp({ harness: rlm });
+```
+
+<Note>
+Clients must specify `mode: "rlm"` in chat requests to use RLM mode.
+</Note>
+
+## Tool Configuration
+
+### Built-in Tools
+
+The server includes four default tools:
+
+<CardGroup cols={2}>
+  <Card title="bash" icon="terminal">
+    Execute shell commands with permission controls
+  </Card>
+  <Card title="agent" icon="robot">
+    Spawn subagents for delegated tasks
+  </Card>
+  <Card title="read" icon="file">
+    Read file contents from the filesystem
+  </Card>
+  <Card title="patch" icon="code">
+    Apply code patches to files
+  </Card>
+</CardGroup>
+
+### Custom Tools
+
+Define custom tools by implementing the `ToolDefinition` interface:
+
+```typescript
+import type { ToolDefinition } from "./packages/ai/types";
+
+const myCustomTool: ToolDefinition = {
+  name: "my_tool",
+  description: "Does something useful",
+  schema: {
+    type: "object",
+    properties: {
+      input: { type: "string", description: "Input parameter" },
+    },
+    required: ["input"],
+  },
+  execute: async (params) => {
+    // Tool implementation
+    return { success: true, output: "result" };
+  },
+  derivePermission: (params) => {
+    // Return permission pattern for "always allow"
+    return { tool: "my_tool", args: { input: params.input } };
+  },
+};
+
+const app = await createApp({
+  tools: [myCustomTool, bashTool, agentTool, readTool, patchTool],
+});
+```
+
+<Warning>
+Always implement `derivePermission` to enable "always allow" functionality for your tool.
+</Warning>
+
+### Tool Permissions
+
+Clients can control tool execution through permission configurations:
+
+```typescript
+// Client request example
+await fetch('/chat', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: 'glm-4.7',
+    messages: [...],
+    permissions: {
+      allowlist: [
+        { tool: 'bash', args: { command: 'ls *' } },
+        { tool: 'read' },
+      ],
+      deny: [
+        { tool: 'bash', args: { command: 'rm *' } },
+      ],
+    },
+  }),
+});
+```
+
+Permission patterns use glob matching (via picomatch):
+- `allowlist`: Auto-approve matching tools
+- `allowOnce`: One-time approval, consumed on use
+- `deny`: Immediately reject matching tools
+
+## Model Configuration
+
+### Default Model
+
+Specify a default model for requests that don't include a model:
+
+```typescript
+const app = await createApp({
+  defaultModel: process.env.DEFAULT_MODEL || "glm-4.7",
+});
+```
+
+The `/models` endpoint returns the default model if it's supported by the configured provider:
+
+```json
+{
+  "models": ["glm-4.7", "kimi-k2.5", "..."]
+  "defaultModel": "glm-4.7"
+}
+```
+
+### Model Validation
+
+The server validates models against the provider's supported models:
+
+```typescript
+const models = await harness.supportedModels();
+const validDefault = defaultModel && models.includes(defaultModel) 
+  ? defaultModel 
+  : undefined;
+```
+
+## Skills Configuration
+
+Skills extend agent capabilities with specialized instructions and workflows:
+
+```typescript
+const app = await createApp({
+  skillDirs: [
+    "./skills",
+    "/etc/llm-gateway/skills",
+    process.env.CUSTOM_SKILLS_DIR,
+  ].filter(Boolean),
+});
+```
+
+### Skills Discovery
+
+The server automatically discovers skills in configured directories:
+
+1. Searches each `skillDir` for valid skill definitions
+2. Formats skills into a system prompt
+3. Prepends skills prompt to agent messages
+
+<Info>
+Skills are discovered at server startup. Restart the server to load new skills.
+</Info>
+
+## Request Configuration
+
+Clients can configure individual chat requests:
+
+### Standard Mode
+
+```typescript
+interface ChatRequest {
+  model: string;              // Required: model identifier
+  messages: Message[];        // Required: conversation history
+  context?: string;           // Optional: additional context
+  permissions?: Permissions;  // Optional: tool permissions
+  mode?: "agent";            // Optional: defaults to agent
+}
+```
+
+### RLM Mode
+
+```typescript
+interface ChatRequest {
+  model: string;
+  messages: Message[];
+  context?: string;           // Long-form content to process
+  mode: "rlm";               // Required for RLM
+  maxIterations?: number;     // Default: 10
+  maxDepth?: number;          // Default: 2
+}
+```
+
+<Tabs>
+  <Tab title="Agent Mode">
+    ```json
+    {
+      "model": "glm-4.7",
+      "messages": [
+        { "role": "user", "content": "List files in current directory" }
+      ],
+      "permissions": {
+        "allowlist": [{ "tool": "bash" }]
+      }
+    }
+    ```
+  </Tab>
+  
+  <Tab title="RLM Mode">
+    ```json
+    {
+      "model": "kimi-k2.5",
+      "messages": [
+        { "role": "user", "content": "Summarize this document" }
+      ],
+      "context": "<very long document content>",
+      "mode": "rlm",
+      "maxIterations": 15,
+      "maxDepth": 3
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Server Options
+
+Bun server options can be configured in the export:
+
+```typescript
+export default {
+  port: Number(process.env.PORT) || 4000,
+  fetch: app.fetch,
+  idleTimeout: 255,  // Seconds before idle connections close
+  // Additional Bun server options:
+  // maxRequestBodySize: 1024 * 1024 * 10, // 10MB
+  // development: process.env.NODE_ENV !== 'production',
+};
+```
+
+<Note>
+See [Bun server documentation](https://bun.sh/docs/api/http) for all available options.
+</Note>
+
+## Multi-Provider Setup
+
+Support multiple providers by creating separate harness configurations:
+
+```typescript
+import { createGeneratorHarness as createZen } from "./packages/ai/harness/providers/zen";
+import { createAnthropicHarness } from "./packages/ai/harness/providers/anthropic";
+
+// Route requests based on model prefix or header
+const getHarness = (model: string) => {
+  if (model.startsWith('claude-')) {
+    return createAgentHarness({ harness: createAnthropicHarness() });
+  }
+  return createAgentHarness({ harness: createZen() });
+};
+
+// This requires modifying the server to support dynamic harness selection
+```
+
+<Warning>
+The default server uses a single harness. Multi-provider support requires custom server modifications.
+</Warning>
+
+## Performance Tuning
+
+### Connection Limits
+
+Manage concurrent connections based on your infrastructure:
+
+```typescript
+// Implement connection limiting middleware
+const connectionLimit = 100;
+let activeConnections = 0;
+
+app.use(async (c, next) => {
+  if (activeConnections >= connectionLimit) {
+    return c.json({ error: 'Server at capacity' }, 503);
+  }
+  activeConnections++;
+  try {
+    await next();
+  } finally {
+    activeConnections--;
+  }
+});
+```
+
+### Memory Management
+
+Orchestrators are automatically cleaned up, but monitor memory for long-running sessions:
+
+```bash
+# Monitor memory usage
+bun --inspect server/index.ts
+
+# Set Node.js memory limits if needed
+NODE_OPTIONS="--max-old-space-size=4096" bun run server/index.ts
+```
+
+## Configuration Best Practices
+
+<Steps>
+  <Step title="Environment-based Configuration">
+    Use environment variables for deployment-specific settings
+  </Step>
+  <Step title="Sensible Defaults">
+    Provide reasonable defaults for optional configuration
+  </Step>
+  <Step title="Validation">
+    Validate configuration at startup to fail fast
+  </Step>
+  <Step title="Documentation">
+    Document custom tools and skills for your team
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Environment Variables" icon="key" href="/deployment/environment-variables">
+    Complete reference for all environment variables
+  </Card>
+  <Card title="HTTP API Reference" icon="book" href="/api/http/overview">
+    Detailed endpoint documentation
+  </Card>
+</CardGroup>

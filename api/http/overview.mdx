@@ -1,0 +1,94 @@
+---
+title: HTTP API Overview
+description: Server-sent events API for streaming AI agent interactions
+---
+
+The LLM Gateway HTTP API provides a streaming interface for interacting with AI agents through Server-Sent Events (SSE). It exposes the agent orchestrator to clients and manages per-session orchestrators with automatic cleanup.
+
+## Base URL
+
+The default server runs on:
+
+```
+http://localhost:4000
+```
+
+## Endpoints
+
+<CardGroup cols={2}>
+  <Card title="GET /models" icon="list" href="/api/http/models">
+    List available models and default model
+  </Card>
+  <Card title="POST /chat" icon="message" href="/api/http/chat">
+    Stream chat completions with tool execution
+  </Card>
+  <Card title="POST /chat/relay/:relayId" icon="arrows-rotate" href="/api/http/relay">
+    Resolve permission requests for tool execution
+  </Card>
+</CardGroup>
+
+## Architecture
+
+Each `POST /chat` request creates a fresh `AgentOrchestrator` for that session. Server-Sent Events flow from the orchestrator until the stream closes or an error occurs. The orchestrator is automatically cleaned up when the connection ends.
+
+## Event Streaming
+
+All streaming endpoints use Server-Sent Events (SSE) with the following format:
+
+```
+event: <event_type>
+data: <json_payload>
+
+```
+
+### Common Event Types
+
+- `connected` - Initial connection established with session ID
+- `harness_start` - Agent harness begins processing
+- `text` - Text content from the AI
+- `reasoning` - Internal reasoning steps (if supported by model)
+- `tool_call` - Agent is calling a tool
+- `tool_result` - Result from tool execution
+- `relay` - Permission request for tool execution
+- `usage` - Token usage information
+- `harness_end` - Agent harness completed processing
+- `error` - Error occurred during processing
+
+## Authentication
+
+The HTTP API currently does not require authentication. Configure your deployment environment to add authentication layers as needed.
+
+## Error Handling
+
+All endpoints return standard HTTP status codes:
+
+- `200` - Success
+- `400` - Bad Request (invalid JSON or missing required fields)
+- `404` - Not Found (session or relay not found)
+- `500` - Internal Server Error
+
+Error responses include a JSON body:
+
+```json
+{
+  "error": "Error message describing what went wrong"
+}
+```
+
+SSE streams may also emit error events:
+
+```
+event: error
+data: {"type":"error","message":"Error details"}
+```
+
+## Starting the Server
+
+```bash
+bun run dev:server  # starts with hot reload
+```
+
+Configure the server with environment variables:
+
+- `PORT` - Server port (default: 4000)
+- `DEFAULT_MODEL` - Default model when not specified in requests

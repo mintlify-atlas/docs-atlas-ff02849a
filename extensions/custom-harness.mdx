@@ -1,0 +1,604 @@
+---
+title: "Building Custom Harnesses"
+description: "Create harness wrappers and middleware for LLM Gateway"
+---
+
+Harnesses are composable async generators that yield events. The agent harness is the canonical example of wrapping a provider harness to add behavior.
+
+## Harness Composition
+
+LLM Gateway's architecture is built on harness composition:
+
+```
+Provider Harness (single LLM call)
+    ↓
+Agent Harness (tool execution + permissions + iteration)
+    ↓
+Orchestrator (multiplexing + relay flow)
+```
+
+Each layer wraps the previous one, adding new capabilities while preserving the event stream interface.
+
+<Info>
+The key insight: harnesses compose because they all implement `GeneratorHarnessModule` and yield `HarnessEvent` types.
+</Info>
+
+## Agent Harness Architecture
+
+The agent harness (packages/ai/harness/agent.ts) is the reference implementation for harness composition. Here's its structure:
+
+### Creating a Wrapper Harness
+
+```typescript
+import { v7 as uuidv7 } from "uuid";
+import type {
+  GeneratorHarnessModule,
+  GeneratorInvokeParams,
+  HarnessEvent,
+  Message,
+} from "../types";
+
+interface AgentHarnessOptions {
+  harness: GeneratorHarnessModule;  // Wrapped provider
+  maxIterations?: number;
+  model?: string;
+}
+
+function createAgentHarness(options: AgentHarnessOptions): GeneratorHarnessModule {
+  const { harness, maxIterations = 10, model: defaultModel } = options;
+
+  return {
+    async *invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+      const model = params.model ?? defaultModel;
+      if (!model) {
+        throw new Error("No model specified");
+      }
+      
+      const myRunId = uuidv7();
+      const parentId = params.env?.parentId;
+
+      // Helper to tag events with this harness's runId
+      const tag = <T extends { runId: string }>(event: T) => {
+        const tagged = { ...event, runId: myRunId };
+        if (parentId) tagged.parentId = parentId;
+        return tagged;
+      };
+
+      yield tag({ type: "harness_start", runId: myRunId });
+
+      // Implementation: wrap the provider harness
+      // ...
+
+      yield tag({ type: "harness_end", runId: myRunId });
+    },
+
+    supportedModels: () => harness.supportedModels(),
+  };
+}
+```
+
+### The Agentic Loop
+
+The agent harness implements a multi-turn iteration loop:
+
+```typescript
+const messages: Message[] = [...params.messages];
+let iterations = 0;
+
+while (iterations++ < maxIterations + 1) {
+  const toolCalls: ToolCall[] = [];
+  let assistantText = "";
+
+  // Call the wrapped provider harness
+  for await (const event of harness.invoke({
+    ...params,
+    model,
+    messages,
+    env: { parentId: myRunId },
+  })) {
+    // Pass through provider events
+    if (event.type === "text") {
+      yield event;
+      assistantText += event.content;
+    } else if (event.type === "reasoning") {
+      yield event;
+    } else if (event.type === "usage") {
+      yield event;
+    } else if (event.type === "error") {
+      yield event;
+      yield tag({ type: "harness_end", runId: myRunId });
+      return;
+    } else if (event.type === "tool_call") {
+      toolCalls.push({
+        id: event.id,
+        name: event.name,
+        arguments: event.input as Record<string, unknown>,
+      });
+    }
+  }
+
+  // No tool calls - we're done
+  if (toolCalls.length === 0) {
+    yield tag({ type: "harness_end", runId: myRunId });
+    return;
+  }
+
+  // Add assistant message with tool calls to history
+  messages.push({
+    role: "assistant",
+    content: assistantText || null,
+    tool_calls: toolCalls,
+  });
+
+  // Execute tools and add results
+  // ...
+
+  // Loop continues with tool results in messages
+}
+```
+
+### Permission Checking
+
+The agent harness implements permission checking using relay events:
+
+```typescript
+import { matchesPermissions } from "../permissions";
+import { deferred } from "../primitives";
+
+for (const tc of toolCalls) {
+  const toolDef = params.tools?.find((t) => t.name === tc.name);
+  const args = tc.arguments ?? {};
+
+  // Check allowlist/allowOnce
+  const isAllowed =
+    params.permissions &&
+    matchesPermissions({ name: tc.name, arguments: args }, params.permissions);
+
+  if (!isAllowed) {
+    // Yield relay event and wait for response
+    const { promise, resolve } = deferred<PermissionResponse>();
+    
+    yield tag({
+      type: "relay",
+      kind: "permission",
+      runId: myRunId,
+      id: uuidv7(),
+      toolCallId: tc.id,
+      tool: tc.name,
+      params: args,
+      respond: (response: PermissionResponse) => resolve(response),
+    });
+
+    // Generator pauses here until respond() is called
+    const decision = await promise;
+
+    if (!decision.approved) {
+      const output = { status: "denied", reason: decision.reason };
+      yield tag({
+        type: "tool_result",
+        runId: myRunId,
+        id: tc.id,
+        name: tc.name,
+        output,
+      });
+      messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: JSON.stringify(output),
+      });
+      continue;
+    }
+  }
+
+  // Tool approved - proceed with execution
+  yield tag({
+    type: "tool_call",
+    runId: myRunId,
+    name: tc.name,
+    id: tc.id,
+    input: args,
+  });
+}
+```
+
+<Note>
+Relay events use deferred promises to pause the generator until `respond()` is called by the consumer.
+</Note>
+
+### Tool Execution
+
+Approved tools are executed concurrently:
+
+```typescript
+const approved: Array<{ tc: ToolCall; toolDef: ToolDefinition }> = [];
+// ... collect approved tools
+
+const results = await Promise.all(
+  approved.map(async ({ tc, toolDef }) => {
+    const toolCtx: ToolContext = {
+      parentId: tc.id,
+      spawn: params.env?.spawn,
+      fileTime: params.env?.fileTime,
+    };
+    
+    try {
+      const { context, result } = await toolDef.execute!(tc.arguments, toolCtx);
+      const output = { context, result };
+      
+      return {
+        event: tag({
+          type: "tool_result",
+          runId: myRunId,
+          name: tc.name,
+          id: tc.id,
+          output,
+        }),
+        message: {
+          role: "tool" as const,
+          tool_call_id: tc.id,
+          content: context ?? JSON.stringify(output),
+        },
+      };
+    } catch (error) {
+      return {
+        event: tag({
+          type: "error",
+          runId: myRunId,
+          error: error instanceof Error ? error : new Error(String(error)),
+        }),
+        message: {
+          role: "tool" as const,
+          tool_call_id: tc.id,
+          content: JSON.stringify({ error: error.message }),
+        },
+      };
+    }
+  }),
+);
+
+// Yield results and add to messages
+for (const { event, message } of results) {
+  yield event;
+  messages.push(message);
+}
+```
+
+## Example: Logging Harness
+
+Here's a simple harness that logs all events:
+
+```typescript
+import { v7 } from "uuid";
+import type {
+  GeneratorHarnessModule,
+  GeneratorInvokeParams,
+  HarnessEvent,
+} from "@llm-gateway/ai/types";
+
+interface LoggingHarnessOptions {
+  harness: GeneratorHarnessModule;
+  logger?: (event: HarnessEvent) => void;
+}
+
+function createLoggingHarness(options: LoggingHarnessOptions): GeneratorHarnessModule {
+  const { harness, logger = console.log } = options;
+
+  return {
+    async *invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+      const startTime = Date.now();
+      logger({ type: "log", message: "Harness invocation started" });
+
+      try {
+        for await (const event of harness.invoke(params)) {
+          logger({ type: "event", event });
+          yield event;
+        }
+      } finally {
+        const duration = Date.now() - startTime;
+        logger({ type: "log", message: `Harness completed in ${duration}ms` });
+      }
+    },
+
+    supportedModels: () => harness.supportedModels(),
+  };
+}
+```
+
+Usage:
+
+```typescript
+import { zenHarness } from "@llm-gateway/ai/harness/providers/zen";
+
+const loggingHarness = createLoggingHarness({
+  harness: zenHarness,
+  logger: (log) => console.log(JSON.stringify(log)),
+});
+
+for await (const event of loggingHarness.invoke({
+  model: "claude-sonnet-4-5",
+  messages: [{ role: "user", content: "Hello" }],
+})) {
+  // Events are logged and passed through
+}
+```
+
+## Example: Retry Harness
+
+A harness that retries on errors:
+
+```typescript
+import type {
+  GeneratorHarnessModule,
+  GeneratorInvokeParams,
+  HarnessEvent,
+} from "@llm-gateway/ai/types";
+
+interface RetryHarnessOptions {
+  harness: GeneratorHarnessModule;
+  maxRetries?: number;
+  retryDelay?: number;
+}
+
+function createRetryHarness(options: RetryHarnessOptions): GeneratorHarnessModule {
+  const { harness, maxRetries = 3, retryDelay = 1000 } = options;
+
+  return {
+    async *invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+      let attempt = 0;
+
+      while (attempt < maxRetries) {
+        attempt++;
+        let hadError = false;
+        const events: HarnessEvent[] = [];
+
+        try {
+          for await (const event of harness.invoke(params)) {
+            if (event.type === "error") {
+              hadError = true;
+              events.push(event);
+              break;
+            }
+            events.push(event);
+            yield event;
+          }
+
+          if (!hadError) {
+            return; // Success
+          }
+
+          if (attempt < maxRetries) {
+            yield {
+              type: "text",
+              runId: v7(),
+              id: v7(),
+              content: `\n[Retrying (attempt ${attempt + 1}/${maxRetries})...]\n`,
+            };
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          } else {
+            // Final attempt failed - yield the error
+            const errorEvent = events.find((e) => e.type === "error");
+            if (errorEvent) yield errorEvent;
+          }
+        } catch (error) {
+          if (attempt >= maxRetries) {
+            yield {
+              type: "error",
+              runId: v7(),
+              error: error instanceof Error ? error : new Error(String(error)),
+            };
+          }
+        }
+      }
+    },
+
+    supportedModels: () => harness.supportedModels(),
+  };
+}
+```
+
+## Example: Caching Harness
+
+A harness that caches responses based on message content:
+
+```typescript
+import { createHash } from "crypto";
+import type {
+  GeneratorHarnessModule,
+  GeneratorInvokeParams,
+  HarnessEvent,
+} from "@llm-gateway/ai/types";
+
+interface CachingHarnessOptions {
+  harness: GeneratorHarnessModule;
+  ttl?: number; // Time to live in milliseconds
+}
+
+function createCachingHarness(options: CachingHarnessOptions): GeneratorHarnessModule {
+  const { harness, ttl = 60000 } = options;
+  const cache = new Map<string, { events: HarnessEvent[]; timestamp: number }>();
+
+  function cacheKey(params: GeneratorInvokeParams): string {
+    const key = JSON.stringify({
+      model: params.model,
+      messages: params.messages,
+      tools: params.tools?.map((t) => t.name),
+    });
+    return createHash("sha256").update(key).digest("hex");
+  }
+
+  return {
+    async *invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+      const key = cacheKey(params);
+      const cached = cache.get(key);
+
+      // Return cached events if not expired
+      if (cached && Date.now() - cached.timestamp < ttl) {
+        for (const event of cached.events) {
+          yield event;
+        }
+        return;
+      }
+
+      // Call underlying harness and cache events
+      const events: HarnessEvent[] = [];
+      for await (const event of harness.invoke(params)) {
+        events.push(event);
+        yield event;
+      }
+
+      cache.set(key, { events, timestamp: Date.now() });
+    },
+
+    supportedModels: () => harness.supportedModels(),
+  };
+}
+```
+
+## Example: Rate Limiting Harness
+
+A harness that enforces rate limits:
+
+```typescript
+import type {
+  GeneratorHarnessModule,
+  GeneratorInvokeParams,
+  HarnessEvent,
+} from "@llm-gateway/ai/types";
+
+interface RateLimitHarnessOptions {
+  harness: GeneratorHarnessModule;
+  maxRequestsPerMinute: number;
+}
+
+function createRateLimitHarness(options: RateLimitHarnessOptions): GeneratorHarnessModule {
+  const { harness, maxRequestsPerMinute } = options;
+  const requests: number[] = [];
+
+  async function waitForSlot() {
+    const now = Date.now();
+    const oneMinuteAgo = now - 60000;
+
+    // Remove requests older than 1 minute
+    while (requests.length > 0 && requests[0]! < oneMinuteAgo) {
+      requests.shift();
+    }
+
+    if (requests.length >= maxRequestsPerMinute) {
+      // Wait until the oldest request is > 1 minute old
+      const waitTime = requests[0]! + 60000 - now;
+      await new Promise((resolve) => setTimeout(resolve, waitTime));
+      return waitForSlot();
+    }
+
+    requests.push(now);
+  }
+
+  return {
+    async *invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+      await waitForSlot();
+      yield* harness.invoke(params);
+    },
+
+    supportedModels: () => harness.supportedModels(),
+  };
+}
+```
+
+## Composing Multiple Harnesses
+
+Harnesses can be stacked:
+
+```typescript
+import { zenHarness } from "@llm-gateway/ai/harness/providers/zen";
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+
+// Stack multiple harness wrappers
+const composedHarness = createLoggingHarness({
+  harness: createRetryHarness({
+    harness: createRateLimitHarness({
+      harness: createAgentHarness({
+        harness: zenHarness,
+        maxIterations: 10,
+      }),
+      maxRequestsPerMinute: 30,
+    }),
+    maxRetries: 3,
+  }),
+  logger: myLogger,
+});
+
+// Use the composed harness
+for await (const event of composedHarness.invoke({
+  model: "claude-sonnet-4-5",
+  messages: [{ role: "user", content: "Hello" }],
+  tools: [bashTool, readTool],
+})) {
+  console.log(event);
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+<Accordion title="Preserve Event Provenance">
+Never modify the runId or parentId of events from wrapped harnesses:
+
+```typescript
+for await (const event of harness.invoke(params)) {
+  yield event; // Pass through untouched
+}
+```
+</Accordion>
+
+<Accordion title="Add Your Own RunId for New Events">
+Only tag NEW events you create with your harness's runId:
+
+```typescript
+const myRunId = uuidv7();
+const tag = (event) => ({ ...event, runId: myRunId });
+
+yield tag({ type: "harness_start", runId: myRunId });
+```
+</Accordion>
+
+<Accordion title="Delegate supportedModels">
+Always delegate to the wrapped harness:
+
+```typescript
+supportedModels: () => harness.supportedModels()
+```
+</Accordion>
+
+<Accordion title="Handle Errors Gracefully">
+Catch errors and yield error events rather than throwing:
+
+```typescript
+try {
+  yield* harness.invoke(params);
+} catch (error) {
+  yield { 
+    type: "error", 
+    runId: myRunId, 
+    error: error instanceof Error ? error : new Error(String(error)) 
+  };
+}
+```
+</Accordion>
+</AccordionGroup>
+
+## Related Resources
+
+<CardGroup cols={2}>
+<Card title="Agent Harness Source" icon="code" href="https://github.com/hvent90/llm-gateway/blob/main/packages/ai/harness/agent.ts">
+  Study the canonical harness wrapper
+</Card>
+<Card title="Events Reference" icon="bolt" href="/api/types">
+  Complete HarnessEvent type definitions
+</Card>
+<Card title="Composition Guide" icon="layer-group" href="/concepts/composition">
+  Learn about harness composition patterns
+</Card>
+<Card title="Orchestrator API" icon="network-wired" href="/api/orchestrator">
+  See how harnesses are orchestrated
+</Card>
+</CardGroup>

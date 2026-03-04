@@ -1,0 +1,130 @@
+---
+title: "bash"
+description: "Execute non-sudo shell commands with timeout control"
+---
+
+## Overview
+
+The `bash` tool allows agents to execute shell commands in a controlled environment. Commands run with a configurable timeout and return stdout, stderr, and exit code information.
+
+## Tool Definition
+
+<ParamField path="command" type="string" required>
+  The shell command to execute. Only non-sudo commands are permitted.
+</ParamField>
+
+<ParamField path="timeout" type="number" default={5}>
+  Timeout in seconds for command execution. Must be a positive number. Commands that exceed the timeout return exit code -1.
+</ParamField>
+
+## Return Value
+
+The tool returns a `ShellResult` object with:
+
+- `exitCode`: Numeric exit code (0 for success, -1 for timeout, non-zero for errors)
+- `stdout`: Standard output from the command
+- `stderr`: Standard error output from the command
+
+## Behavior
+
+### Timeout Handling
+
+When a command exceeds the specified timeout:
+- Exit code is set to -1
+- Both stdout and stderr are empty strings
+- Context message indicates the timeout duration
+
+### Permission Derivation
+
+The tool implements intelligent permission derivation for the "always allow" feature:
+
+- Extracts the first word of the command (before the first space)
+- Creates a permission pattern like `command **` to match the base command with any arguments
+- Example: `ls -la /tmp` derives permission for `ls **`
+
+### Output Format
+
+The context returned to the agent includes:
+- stdout section (if present)
+- stderr section (if present)
+- exit code line
+
+## Usage Examples
+
+### Basic Command Execution
+
+```typescript
+import { bashTool } from "@llm-gateway/ai/tools";
+
+const result = await bashTool.execute(
+  { command: "ls -la", timeout: 5 },
+  ctx
+);
+
+// result.context:
+// stdout:
+// total 24
+// drwxr-xr-x  3 user user 4096 Mar  4 10:30 .
+// drwxr-xr-x 15 user user 4096 Mar  4 10:25 ..
+// exit code: 0
+```
+
+### Command with Custom Timeout
+
+```typescript
+const result = await bashTool.execute(
+  { command: "npm install", timeout: 60 },
+  ctx
+);
+```
+
+### Handling Errors
+
+```typescript
+const result = await bashTool.execute(
+  { command: "cat nonexistent.txt", timeout: 5 },
+  ctx
+);
+
+// result.result.exitCode: 1
+// result.context includes stderr with error message
+```
+
+### Timeout Example
+
+```typescript
+const result = await bashTool.execute(
+  { command: "sleep 10", timeout: 2 },
+  ctx
+);
+
+// result.context: "Command timed out after 2 seconds"
+// result.result.exitCode: -1
+```
+
+## Implementation Details
+
+The tool is defined in `packages/ai/tools/bash.ts` and uses the `execShell` utility from `./lib/shell` for actual command execution.
+
+### Schema Definition
+
+```typescript
+const schema = z.object({
+  command: z.string().describe("The shell command to execute"),
+  timeout: z.number().positive().default(5).describe("Timeout in seconds (default: 5)"),
+});
+```
+
+### Execute Function
+
+The execute function:
+1. Calls `execShell` with the command and timeout
+2. Checks for timeout condition (exitCode -1 with no output)
+3. Formats stdout, stderr, and exit code into context string
+4. Returns both formatted context and structured result
+
+## Related Tools
+
+- [read](/api/tools/read) - Read file contents
+- [patch](/api/tools/patch) - Apply file modifications
+- [agent](/api/tools/agent) - Spawn subagents for complex tasks

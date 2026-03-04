@@ -1,0 +1,280 @@
+---
+title: OpenAI Harness
+description: Provider harness for OpenAI Responses API with reasoning support
+---
+
+## Overview
+
+The OpenAI harness provides direct integration with OpenAI's Responses API. It supports reasoning models like o1 and o3 with native reasoning content streaming.
+
+## Import
+
+```typescript
+import { createGeneratorHarness, openAiHarness } from "@llm-gateway/ai/harness/providers/openai";
+```
+
+## Function Signature
+
+```typescript
+function createGeneratorHarness(
+  apiKeyOrOptions?: string | OpenAIHarnessOptions
+): GeneratorHarnessModule
+```
+
+### Parameters
+
+<ParamField path="apiKeyOrOptions" type="string | OpenAIHarnessOptions">
+  API key string or configuration object
+  
+  <ParamField path="apiKey" type="string">
+    OpenAI API key. Falls back to `OPENAI_API_KEY` environment variable
+  </ParamField>
+  
+  <ParamField path="model" type="string">
+    Default model to use if not specified at invoke time
+  </ParamField>
+</ParamField>
+
+### Returns
+
+<ResponseField name="GeneratorHarnessModule" type="object">
+  A harness module with `invoke()` and `supportedModels()` methods
+</ResponseField>
+
+## What It Does
+
+The OpenAI harness makes single LLM API calls and yields events for:
+
+- **reasoning**: Streamed reasoning text from o1/o3 models
+- **text**: Streamed output text content
+- **tool_call**: Function calls from the model
+- **error**: Any errors that occur
+
+It does NOT:
+- Execute tools (that's the agent wrapper's job)
+- Handle permissions (that's the agent wrapper's job)
+- Loop after tool calls (that's the agent wrapper's job)
+
+## Basic Example
+
+```typescript
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/openai";
+
+// Create with API key
+const harness = createGeneratorHarness({
+  apiKey: process.env.OPENAI_API_KEY,
+  model: "gpt-4o",
+});
+
+// Make a single LLM call
+for await (const event of harness.invoke({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Using the Singleton
+
+```typescript
+import { openAiHarness } from "@llm-gateway/ai/harness/providers/openai";
+
+// Use pre-configured singleton (reads OPENAI_API_KEY from env)
+for await (const event of openAiHarness.invoke({
+  model: "o1",
+  messages: [{ role: "user", content: "Solve this problem..." }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Reasoning Models
+
+O1 and O3 models support native reasoning content:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "o1",
+  messages: [{ role: "user", content: "Solve this complex math problem..." }],
+})) {
+  if (event.type === "reasoning") {
+    console.log("[Reasoning]", event.content);
+  }
+  if (event.type === "text") {
+    console.log("[Answer]", event.content);
+  }
+}
+```
+
+## With Tools
+
+```typescript
+import { z } from "zod";
+
+const tools = [
+  {
+    name: "calculator",
+    description: "Perform mathematical calculations",
+    schema: z.object({
+      expression: z.string(),
+    }),
+  },
+];
+
+for await (const event of harness.invoke({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Calculate 15 * 23" }],
+  tools,
+})) {
+  if (event.type === "tool_call") {
+    console.log(`Tool: ${event.name}`);
+    console.log(`Input:`, event.input);
+  }
+}
+```
+
+All tools are created with `strict: true` for structured output enforcement.
+
+## Responses API Format
+
+The OpenAI harness uses the Responses API, which has a different structure than Chat Completions:
+
+```typescript
+// System messages become instructions
+// Tool results are function_call_output items
+for await (const event of harness.invoke({
+  model: "gpt-4o",
+  messages: [
+    { role: "system", content: "You are a helpful assistant" },
+    { role: "user", content: "Hello" },
+    { role: "assistant", tool_calls: [{ id: "1", name: "search", arguments: {...} }] },
+    { role: "tool", tool_call_id: "1", content: "Results..." },
+  ],
+})) {
+  console.log(event);
+}
+```
+
+## Multimodal Support
+
+Supports images and files:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "gpt-4o",
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Analyze this image" },
+        {
+          type: "image",
+          mediaType: "image/png",
+          data: base64ImageData,
+        },
+      ],
+    },
+  ],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Supported Models
+
+Automatically filters for chat models:
+
+```typescript
+const models = await harness.supportedModels();
+console.log("Available models:", models);
+// Returns models containing: gpt, o1, o3, or chatgpt
+```
+
+## Wrapping with Agent Harness
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/openai";
+
+// Wrap OpenAI provider with agent capabilities
+const agent = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 10,
+});
+
+// Now supports tool execution and looping
+for await (const event of agent.invoke({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Search and summarize results" }],
+  tools: [searchTool, readTool],
+})) {
+  console.log(event);
+}
+```
+
+## Event Types
+
+### Reasoning Text Delta
+
+```typescript
+if (event.type === "reasoning") {
+  // event.content: string - reasoning content chunk
+  // event.id: string - stable ID for this reasoning stream
+  // event.runId: string - provider call ID
+}
+```
+
+### Output Text Delta
+
+```typescript
+if (event.type === "text") {
+  // event.content: string - output text chunk
+  // event.id: string - stable ID for this text stream
+  // event.runId: string - provider call ID
+}
+```
+
+### Tool Call
+
+```typescript
+if (event.type === "tool_call") {
+  // event.name: string - function name
+  // event.input: unknown - parsed arguments
+  // event.id: string - call_id from Responses API
+}
+```
+
+## Error Handling
+
+```typescript
+for await (const event of harness.invoke({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "error") {
+    console.error("Error:", event.error.message);
+  }
+}
+```
+
+## Architecture Notes
+
+- Uses OpenAI SDK for streaming
+- Tracks tool calls by output_index
+- Handles reasoning_text.delta and output_text.delta separately
+- Converts message format from OpenAI chat to Responses API
+- Single iteration only - compose with agent harness for loops
+
+## Related
+
+- [Agent Harness](/api/harnesses/agent) - Wrap provider with agentic capabilities
+- [Zen Harness](/api/harnesses/zen) - OpenAI-compatible provider
+- [Anthropic Harness](/api/harnesses/anthropic) - Anthropic Messages API
+- [OpenRouter Harness](/api/harnesses/openrouter) - Multi-provider aggregator

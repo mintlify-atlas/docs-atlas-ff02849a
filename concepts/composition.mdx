@@ -1,0 +1,418 @@
+---
+title: Composition
+description: How harnesses wrap around harnesses to layer behavior without changing the interface
+icon: layer-group
+---
+
+## The composition pattern
+
+Harnesses compose because they all implement the same interface: `invoke()` returns an async iterable of events. This means you can wrap one harness around another to add behavior without modifying the inner harness.
+
+The agent harness is the canonical example:
+
+```typescript
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+// Wrap the Zen provider with agent behavior
+const agent = createAgentHarness({ 
+  harness: createGeneratorHarness() 
+});
+```
+
+The agent harness:
+1. Calls `invoke()` on the inner provider harness
+2. Collects events from the provider
+3. Adds new behavior (permission checks, tool execution, iteration)
+4. Yields events to its own consumers
+
+## How the agent wraps a provider
+
+Let's trace the composition inside `harness/agent.ts:31`:
+
+```typescript Agent harness wrapping Zen provider
+function createAgentHarness(options: AgentHarnessOptions): GeneratorHarnessModule {
+  const { harness, maxIterations = 10, model: defaultModel } = options;
+
+  return {
+    async *invoke(params: GeneratorInvokeParams): AsyncIterable<HarnessEvent> {
+      const myRunId = uuidv7();
+      yield { type: "harness_start", runId: myRunId };
+
+      const messages: Message[] = [...params.messages];
+      let iterations = 0;
+
+      while (iterations++ < maxIterations + 1) {
+        // Call the inner provider harness
+        for await (const event of harness.invoke({ ...params, messages })) {
+          if (event.type === "text") {
+            yield event;  // Pass through text events
+          }
+          if (event.type === "tool_call") {
+            // Collect tool calls for processing
+          }
+        }
+
+        // Agent-specific logic: check permissions, execute tools
+        // ... (permission checking, tool execution)
+
+        // Loop continues until no tool calls remain
+      }
+
+      yield { type: "harness_end", runId: myRunId };
+    },
+    supportedModels: () => harness.supportedModels()
+  };
+}
+```
+
+Key points:
+- The agent receives the provider as `options.harness`
+- It calls `harness.invoke()` inside its own generator
+- It re-yields some events unchanged (like `text`)
+- It adds new events (like `harness_start`, `relay`, `tool_result`)
+- It loops, calling the provider multiple times with updated messages
+
+## Layering behavior
+
+Because harnesses share an interface, you can stack them:
+
+```typescript Three-layer composition
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+const provider = createGeneratorHarness();
+const agent = createAgentHarness({ harness: provider });
+const logged = createLoggingHarness(agent);
+
+for await (const event of logged.invoke(params)) {
+  // Events flow through: logged → agent → provider
+}
+```
+
+Each layer:
+- Receives events from the layer below
+- Optionally transforms, filters, or adds events
+- Yields to the layer above
+
+## Common composition patterns
+
+### Logging wrapper
+
+Log every event passing through:
+
+```typescript
+function createLoggingHarness(
+  baseHarness: GeneratorHarnessModule
+): GeneratorHarnessModule {
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      const startTime = Date.now();
+      console.log("[harness] invoke", { model: params.model });
+
+      let eventCount = 0;
+      for await (const event of baseHarness.invoke(params)) {
+        eventCount++;
+        console.log(`[harness] event #${eventCount}:`, event.type);
+        yield event;
+      }
+
+      const duration = Date.now() - startTime;
+      console.log(`[harness] complete: ${eventCount} events in ${duration}ms`);
+    },
+    supportedModels: () => baseHarness.supportedModels()
+  };
+}
+```
+
+### Retry wrapper
+
+Retry on errors:
+
+```typescript
+function createRetryHarness(
+  baseHarness: GeneratorHarnessModule,
+  maxRetries = 3
+): GeneratorHarnessModule {
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      let attempt = 0;
+      let lastError: Error | undefined;
+
+      while (attempt < maxRetries) {
+        attempt++;
+        let hasError = false;
+
+        try {
+          for await (const event of baseHarness.invoke(params)) {
+            if (event.type === "error") {
+              hasError = true;
+              lastError = event.error;
+              break;  // Exit inner loop, retry
+            }
+            yield event;
+          }
+          
+          if (!hasError) return;  // Success, exit
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+        }
+
+        if (attempt < maxRetries) {
+          console.log(`Retry attempt ${attempt}/${maxRetries}`);
+          await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+        }
+      }
+
+      // All retries exhausted
+      yield {
+        type: "error",
+        runId: "",
+        error: lastError ?? new Error("Max retries exceeded")
+      };
+    },
+    supportedModels: () => baseHarness.supportedModels()
+  };
+}
+```
+
+### Rate limiting wrapper
+
+Throttle invocations:
+
+```typescript
+function createRateLimitedHarness(
+  baseHarness: GeneratorHarnessModule,
+  minDelayMs = 1000
+): GeneratorHarnessModule {
+  let lastInvoke = 0;
+
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      const now = Date.now();
+      const elapsed = now - lastInvoke;
+      
+      if (elapsed < minDelayMs) {
+        await new Promise(resolve => setTimeout(resolve, minDelayMs - elapsed));
+      }
+
+      lastInvoke = Date.now();
+
+      for await (const event of baseHarness.invoke(params)) {
+        yield event;
+      }
+    },
+    supportedModels: () => baseHarness.supportedModels()
+  };
+}
+```
+
+### Caching wrapper
+
+Cache responses by message hash:
+
+```typescript
+import { createHash } from "crypto";
+
+function createCachingHarness(
+  baseHarness: GeneratorHarnessModule
+): GeneratorHarnessModule {
+  const cache = new Map<string, HarnessEvent[]>();
+
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      const key = createHash("sha256")
+        .update(JSON.stringify(params.messages))
+        .digest("hex");
+
+      // Check cache
+      if (cache.has(key)) {
+        console.log("[cache] hit");
+        for (const event of cache.get(key)!) {
+          yield event;
+        }
+        return;
+      }
+
+      // Miss: invoke and cache
+      console.log("[cache] miss");
+      const events: HarnessEvent[] = [];
+      for await (const event of baseHarness.invoke(params)) {
+        events.push(event);
+        yield event;
+      }
+      cache.set(key, events);
+    },
+    supportedModels: () => baseHarness.supportedModels()
+  };
+}
+```
+
+## Event transformation
+
+Wrappers can transform events as they pass through:
+
+```typescript Prefix all text with metadata
+function createPrefixHarness(
+  baseHarness: GeneratorHarnessModule,
+  prefix: string
+): GeneratorHarnessModule {
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      let firstText = true;
+
+      for await (const event of baseHarness.invoke(params)) {
+        if (event.type === "text" && firstText) {
+          firstText = false;
+          yield { ...event, content: prefix + event.content };
+        } else {
+          yield event;
+        }
+      }
+    },
+    supportedModels: () => baseHarness.supportedModels()
+  };
+}
+```
+
+## Selective passthrough
+
+Wrappers can filter events:
+
+```typescript Hide reasoning from consumers
+function createNoReasoningHarness(
+  baseHarness: GeneratorHarnessModule
+): GeneratorHarnessModule {
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      for await (const event of baseHarness.invoke(params)) {
+        if (event.type !== "reasoning") {
+          yield event;  // Pass everything except reasoning
+        }
+      }
+    },
+    supportedModels: () => baseHarness.supportedModels()
+  };
+}
+```
+
+## Multi-provider fallback
+
+Compose multiple providers with fallback logic:
+
+```typescript
+function createFallbackHarness(
+  primaryHarness: GeneratorHarnessModule,
+  fallbackHarness: GeneratorHarnessModule
+): GeneratorHarnessModule {
+  return {
+    async *invoke(params: GeneratorInvokeParams) {
+      let hasError = false;
+
+      for await (const event of primaryHarness.invoke(params)) {
+        if (event.type === "error") {
+          console.log("[fallback] Primary failed, trying fallback");
+          hasError = true;
+          break;
+        }
+        yield event;
+      }
+
+      if (hasError) {
+        for await (const event of fallbackHarness.invoke(params)) {
+          yield event;
+        }
+      }
+    },
+    async supportedModels() {
+      const [primary, fallback] = await Promise.all([
+        primaryHarness.supportedModels(),
+        fallbackHarness.supportedModels()
+      ]);
+      return [...primary, ...fallback];
+    }
+  };
+}
+```
+
+## Composition vs modification
+
+Composition has key advantages over modifying harness internals:
+
+<AccordionGroup>
+  <Accordion title="No coupling">
+    Wrappers don't need to understand the inner harness implementation. They only need to handle events.
+  </Accordion>
+  
+  <Accordion title="Reusable">
+    A logging wrapper works with any harness: providers, agents, or custom harnesses.
+  </Accordion>
+  
+  <Accordion title="Testable">
+    You can test wrappers in isolation using a deterministic harness that yields canned events.
+  </Accordion>
+  
+  <Accordion title="Mixable">
+    Stack wrappers in any order: logging + retry + rate limiting + caching.
+  </Accordion>
+</AccordionGroup>
+
+## Testing with deterministic harness
+
+The deterministic harness lets you test composition without calling real LLMs:
+
+```typescript
+import { createDeterministicHarness } from "./packages/ai/harness/providers/deterministic";
+
+const mockHarness = createDeterministicHarness([
+  { type: "text", content: "Hello" },
+  { type: "tool_call", name: "bash", input: { command: "ls" } },
+  { type: "usage", inputTokens: 10, outputTokens: 5 }
+]);
+
+const logged = createLoggingHarness(mockHarness);
+
+for await (const event of logged.invoke(params)) {
+  // Yields the 3 canned events with logging
+}
+```
+
+## Real-world composition
+
+Here's how the orchestrator composes harnesses for production:
+
+```typescript From orchestrator.ts:94
+const agent = createAgentHarness({ 
+  harness: createGeneratorHarness() 
+});
+
+const agentId = orchestrator.spawn({
+  model: "glm-4.7",
+  messages,
+  tools: [bashTool, agentTool, readTool],
+  permissions: { allowlist: [] }
+});
+```
+
+Internally:
+1. `createGeneratorHarness()` creates a Zen provider
+2. `createAgentHarness()` wraps it to add tool execution and permissions
+3. `orchestrator.spawn()` wraps that in multiplexing and relay management
+4. Each layer adds behavior while preserving the event stream interface
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Custom Harnesses" icon="wrench" href="/extensions/custom-harness">
+    Build your own harness wrappers
+  </Card>
+  <Card title="Custom Provider" icon="plug" href="/extensions/custom-provider">
+    Implement a provider harness for a new LLM
+  </Card>
+  <Card title="Agent API" icon="book" href="/api/harnesses/agent">
+    Full agent harness implementation reference
+  </Card>
+  <Card title="Orchestrator" icon="diagram-project" href="/api/orchestrator">
+    Multi-agent composition patterns
+  </Card>
+</CardGroup>

@@ -1,0 +1,457 @@
+---
+title: Permissions
+description: Glob-pattern permission system for controlling tool access with allowlists and human-in-the-loop approval
+icon: shield
+---
+
+## Overview
+
+The permissions system controls which tools an agent can execute. You define rules using glob patterns, and the agent harness checks these rules before executing tools. When a tool call doesn't match any allowlist rule, the harness yields a **relay event** and pauses until you respond with approval or denial.
+
+This enables human-in-the-loop workflows where sensitive operations require explicit permission.
+
+## Permission structure
+
+Permissions are defined in `packages/ai/types.ts:49`:
+
+```typescript
+interface ToolPermission {
+  tool: string;                           // Tool name (exact match)
+  params?: Record<string, string>;        // param name → glob pattern
+}
+
+interface Permissions {
+  allowlist?: ToolPermission[];   // Always allowed
+  allowOnce?: ToolPermission[];   // Allowed once, then removed
+  deny?: Array<{                  // Explicitly denied tool calls
+    toolCallId: string;
+    reason?: string;
+  }>;
+}
+```
+
+<ParamField path="allowlist" type="ToolPermission[]">
+  Rules that grant permanent permission. Checked on every tool call.
+</ParamField>
+
+<ParamField path="allowOnce" type="ToolPermission[]">
+  Rules that grant one-time permission. After the first match, the rule is removed from the list.
+</ParamField>
+
+<ParamField path="deny" type="Array<{ toolCallId, reason }>">
+  Explicit denials for specific tool call IDs. Useful for denying a tool call that was previously approved in principle but shouldn't execute now.
+</ParamField>
+
+## Basic usage
+
+### Allow all calls to a tool
+
+```typescript
+const permissions: Permissions = {
+  allowlist: [
+    { tool: "bash" }  // All bash calls allowed
+  ]
+};
+
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages,
+  tools: [bashTool],
+  permissions
+})) {
+  // Agent can call bash freely, no relay events
+}
+```
+
+### Allow specific parameters
+
+Use glob patterns to restrict parameters:
+
+```typescript
+const permissions: Permissions = {
+  allowlist: [
+    { 
+      tool: "bash",
+      params: { 
+        command: "ls*"  // Only allow bash commands starting with "ls"
+      }
+    }
+  ]
+};
+```
+
+Glob patterns use [picomatch](https://github.com/micromatch/picomatch) with bash-style matching:
+
+| Pattern | Matches |
+|---------|----------|
+| `ls*` | `ls`, `ls -la`, `ls /tmp` |
+| `*.txt` | `file.txt`, `data.txt` |
+| `src/**/*.ts` | Any `.ts` file under `src/` |
+| `{read,write}` | Either `read` or `write` |
+| `file[0-9].txt` | `file0.txt`, `file1.txt`, etc. |
+
+### Multiple parameter patterns
+
+All patterns must match for a tool call to be allowed:
+
+```typescript
+const permissions: Permissions = {
+  allowlist: [
+    {
+      tool: "read",
+      params: {
+        filePath: "src/**/*.ts",  // Must be a .ts file in src/
+        limit: "100"              // Must request exactly 100 lines
+      }
+    }
+  ]
+};
+```
+
+## Permission checking flow
+
+When the agent receives tool calls from the model, it processes them in two phases:
+
+### Phase 1: Permission checks (sequential)
+
+For each tool call:
+
+1. **Check deny list**: If `toolCallId` is in `permissions.deny`, yield `tool_result` with `{ status: "denied", reason }` and skip execution
+2. **Check allowlist/allowOnce**: If the tool call matches any rule in `allowlist` or `allowOnce`, approve it
+3. **No match**: Yield a **relay event** and pause via a deferred promise
+4. **Wait for response**: When consumer calls `respond()`, resume
+5. **Denied**: Yield `tool_result` with denial reason
+6. **Approved**: Continue to execution phase
+
+From `harness/agent.ts:137`:
+
+```typescript
+// Check deny list first
+const denial = params.permissions?.deny?.find((d) => d.toolCallId === tc.id);
+if (denial) {
+  yield { type: "tool_result", id: tc.id, name: tc.name, output: { status: "denied", reason: denial.reason } };
+  continue;
+}
+
+// Check if allowed
+const isAllowed = params.permissions && matchesPermissions({ name: tc.name, arguments: args }, params.permissions);
+
+if (!isAllowed) {
+  // Yield relay event and pause
+  const { promise, resolve } = deferred<PermissionResponse>();
+  yield {
+    type: "relay",
+    kind: "permission",
+    toolCallId: tc.id,
+    tool: tc.name,
+    params: args,
+    respond: (response) => resolve(response)
+  };
+  const decision = await promise;  // Generator pauses here
+  
+  if (!decision.approved) {
+    yield { type: "tool_result", id: tc.id, output: { status: "denied", reason: decision.reason } };
+    continue;
+  }
+}
+```
+
+### Phase 2: Tool execution (concurrent)
+
+All approved tool calls execute concurrently via `Promise.all()` (from `harness/agent.ts:264`):
+
+```typescript
+const results = await Promise.all(
+  approved.map(async ({ tc, toolDef }) => {
+    const { context, result } = await toolDef.execute!(tc.arguments, toolCtx);
+    return {
+      event: { type: "tool_result", id: tc.id, name: tc.name, output: { context, result } },
+      message: { role: "tool", tool_call_id: tc.id, content: context ?? JSON.stringify({ context, result }) }
+    };
+  })
+);
+```
+
+## Handling relay events
+
+When the agent yields a relay event, you must call `respond()` to approve or deny:
+
+```typescript
+for await (const event of agent.invoke({ messages, tools, permissions })) {
+  if (event.type === "relay" && event.kind === "permission") {
+    console.log(`Agent wants to call ${event.tool} with`, event.params);
+    
+    const approved = await askUser(`Allow ${event.tool}?`);
+    
+    event.respond({
+      approved,
+      reason: approved ? undefined : "User denied"
+    });
+  }
+}
+```
+
+<Warning>
+If you don't call `respond()`, the agent will hang forever. Always handle relay events.
+</Warning>
+
+## Permission response
+
+```typescript
+type PermissionResponse =
+  | { approved: true; always?: boolean }   // Approve this call (optionally add to allowlist)
+  | { approved: false; reason?: string };  // Deny with optional reason
+```
+
+<ParamField path="approved" type="boolean" required>
+  Whether to allow the tool call.
+</ParamField>
+
+<ParamField path="always" type="boolean">
+  If `true`, add this tool + params to the allowlist so future calls are auto-approved. (Note: not yet implemented in agent harness, but supported by orchestrator.)
+</ParamField>
+
+<ParamField path="reason" type="string">
+  Human-readable explanation for denial.
+</ParamField>
+
+## Using the orchestrator
+
+The orchestrator manages relay events across multiple agents. When you spawn agents via the orchestrator, relay events have their `respond` callback stripped and you use `resolveRelay()` instead:
+
+```typescript
+import { AgentOrchestrator } from "./packages/ai/orchestrator";
+
+const orchestrator = new AgentOrchestrator();
+
+const agentId = orchestrator.spawn({
+  model: "glm-4.7",
+  messages,
+  tools: [bashTool],
+  permissions: { allowlist: [] }  // No auto-approvals
+});
+
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "relay" && event.kind === "permission") {
+    const approved = await askUser(`Allow ${event.tool}?`);
+    
+    orchestrator.resolveRelay(event.id, {
+      approved,
+      reason: approved ? undefined : "User denied"
+    });
+  }
+}
+```
+
+<Info>
+See [Orchestrator](/api/orchestrator) for multi-agent relay coordination.
+</Info>
+
+## Pattern matching reference
+
+The `matchesPermission` function in `packages/ai/permissions.ts:9` implements the matching logic:
+
+```typescript
+export function matchesPermission(toolCall: ToolCallLike, permission: ToolPermission): boolean {
+  if (toolCall.name !== permission.tool) {
+    return false;  // Tool name must match exactly
+  }
+
+  if (!permission.params) {
+    return true;  // No param constraints, allow all calls to this tool
+  }
+
+  for (const [paramName, pattern] of Object.entries(permission.params)) {
+    const value = toolCall.arguments?.[paramName];
+    if (value === undefined) {
+      return false;  // Param is required but missing
+    }
+    if (!picomatch.isMatch(String(value), pattern, { bash: true })) {
+      return false;  // Param doesn't match pattern
+    }
+  }
+
+  return true;  // All patterns matched
+}
+```
+
+Key behaviors:
+- Tool name is **exact match** (not a pattern)
+- All param patterns must match (AND logic)
+- Missing params cause rejection
+- Param values are coerced to strings before matching
+
+## Common patterns
+
+<AccordionGroup>
+  <Accordion title="Read-only filesystem access">
+    ```typescript
+    {
+      allowlist: [
+        { tool: "read" },  // Allow all reads
+        { tool: "bash", params: { command: "ls*" } },  // Allow ls only
+        { tool: "bash", params: { command: "cat *" } }  // Allow cat only
+      ]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Restrict to specific directories">
+    ```typescript
+    {
+      allowlist: [
+        { tool: "read", params: { filePath: "/app/data/**" } },
+        { tool: "bash", params: { command: "ls /app/data*" } }
+      ]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Allow safe commands only">
+    ```typescript
+    {
+      allowlist: [
+        { tool: "bash", params: { command: "@(ls|cat|grep|find|head|tail) *" } }
+      ]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Deny specific tool calls">
+    ```typescript
+    {
+      allowlist: [{ tool: "bash" }],
+      deny: [
+        { toolCallId: "tc-123", reason: "This specific call looks suspicious" }
+      ]
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="One-time approval">
+    ```typescript
+    {
+      allowOnce: [
+        { tool: "bash", params: { command: "rm -rf /tmp/cache" } }
+      ]
+    }
+    // After first match, this rule is removed
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Deriving permissions from tool definitions
+
+Tools can include a `derivePermission` function to suggest permission rules:
+
+```typescript
+const readTool: ToolDefinition = {
+  name: "read",
+  description: "Read a file",
+  schema: z.object({ filePath: z.string() }),
+  execute: async ({ filePath }) => {
+    const content = await fs.readFile(filePath, "utf-8");
+    return { context: content };
+  },
+  derivePermission: (params) => ({
+    tool: "read",
+    params: { filePath: params.filePath as string }
+  })
+};
+```
+
+This enables auto-suggesting allowlist rules based on tool call parameters.
+
+## Security considerations
+
+<Warning>
+**Glob patterns are not sandboxing.** They control which tool calls are allowed but don't prevent path traversal, command injection, or other exploits. Always validate tool inputs.
+</Warning>
+
+<AccordionGroup>
+  <Accordion title="Path traversal">
+    Pattern `src/**/*.ts` matches `src/../../../../etc/passwd.ts`. Use absolute paths and validate file existence.
+  </Accordion>
+
+  <Accordion title="Command injection">
+    Pattern `ls*` matches `ls; rm -rf /`. Validate commands against a strict allowlist or use parameterized tools.
+  </Accordion>
+
+  <Accordion title="Model manipulation">
+    Models can craft arguments to exploit glob patterns. Review permissions carefully and prefer explicit allowlists.
+  </Accordion>
+</AccordionGroup>
+
+## Dynamic permissions
+
+You can update permissions dynamically by mutating the orchestrator's permission map:
+
+```typescript
+const orchestrator = new AgentOrchestrator();
+
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "relay" && event.kind === "permission") {
+    const approved = await askUser(`Allow ${event.tool}? (always/once/no)`);
+    
+    if (approved === "always") {
+      // Add to allowlist
+      orchestrator.updatePermissions(agentId, {
+        allowlist: [
+          ...orchestrator.getPermissions(agentId).allowlist,
+          { tool: event.tool, params: event.params }
+        ]
+      });
+    }
+    
+    orchestrator.resolveRelay(event.id, { approved: approved !== "no" });
+  }
+}
+```
+
+<Info>
+See `orchestrator.ts:197` for `updatePermissions()` implementation.
+</Info>
+
+## Testing permissions
+
+Use a deterministic harness to test permission logic without calling real LLMs:
+
+```typescript
+import { createDeterministicHarness } from "./packages/ai/harness/providers/deterministic";
+import { createAgentHarness } from "./packages/ai/harness/agent";
+
+const mockProvider = createDeterministicHarness([
+  { type: "tool_call", id: "tc-1", name: "bash", input: { command: "rm -rf /" } }
+]);
+
+const agent = createAgentHarness({ harness: mockProvider });
+
+const events = [];
+for await (const event of agent.invoke({
+  messages,
+  tools: [bashTool],
+  permissions: { allowlist: [{ tool: "bash", params: { command: "ls*" } }] }
+})) {
+  events.push(event);
+}
+
+// Assert relay event was yielded
+assert(events.some(e => e.type === "relay"));
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Human-in-the-Loop" icon="hand" href="/guides/human-in-the-loop">
+    Build interactive approval workflows
+  </Card>
+  <Card title="Orchestrator" icon="diagram-project" href="/api/orchestrator">
+    Multi-agent permission coordination
+  </Card>
+  <Card title="Custom Tools" icon="wrench" href="/extensions/custom-tool">
+    Add derivePermission to your tools
+  </Card>
+  <Card title="Agent API" icon="book" href="/api/harnesses/agent">
+    Full agent harness permission handling
+  </Card>
+</CardGroup>

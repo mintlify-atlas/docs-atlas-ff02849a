@@ -1,0 +1,250 @@
+---
+title: "read"
+description: "Read files from the filesystem with support for text, images, and PDFs"
+---
+
+## Overview
+
+The `read` tool provides flexible file reading capabilities for agents. It handles text files with line numbering, images as base64-encoded content, and PDFs as base64-encoded documents. The tool includes intelligent truncation and binary detection.
+
+## Tool Definition
+
+<ParamField path="filePath" type="string" required>
+  Absolute path to the file to read. Relative paths are not supported.
+</ParamField>
+
+<ParamField path="offset" type="number" default={0}>
+  0-based line number to start reading from. Only applies to text files. Useful for reading large files in chunks.
+</ParamField>
+
+<ParamField path="limit" type="number" default={2000}>
+  Maximum number of lines to read from text files. Default is 2000 lines.
+</ParamField>
+
+## Return Value
+
+### Text Files
+
+Returns a string context with:
+- XML-wrapped file content with metadata
+- Line numbers (1-based display)
+- Truncation indicators if applicable
+
+### Images
+
+Returns an array containing an `ImageContentPart`:
+- `type`: "image"
+- `mediaType`: MIME type (image/png, image/jpeg, etc.)
+- `data`: Base64-encoded image data
+
+### PDFs
+
+Returns an array containing a `DocumentContentPart`:
+- `type`: "document"
+- `mediaType`: "application/pdf"
+- `data`: Base64-encoded PDF data
+
+## Behavior
+
+### File Type Detection
+
+The tool determines file type based on extension:
+
+**Supported Image Extensions:**
+- `.png` → image/png
+- `.jpg`, `.jpeg` → image/jpeg
+- `.gif` → image/gif
+- `.webp` → image/webp
+
+**PDF Extension:**
+- `.pdf` → application/pdf
+
+**All Others:**
+Treated as text files with binary detection
+
+### Size Limits
+
+- **Text files:** 50KB of output (after formatting with line numbers)
+- **Images and PDFs:** 5MB maximum file size
+
+Files exceeding these limits are rejected with an error message.
+
+### Binary Detection
+
+For non-image, non-PDF files:
+1. Reads the file into a buffer
+2. Checks the first 8KB for null bytes (0x00)
+3. If null bytes found, rejects as binary
+4. Otherwise, processes as UTF-8 text
+
+### Line Truncation
+
+For text files:
+- Lines longer than 2000 characters are truncated with ` [truncated]` suffix
+- Output stops if total formatted content exceeds 50KB
+- Truncation message indicates use of offset/limit for continuation
+
+### Line Number Formatting
+
+Text output uses 1-based line numbers with consistent formatting:
+```
+   1 | first line of content
+   2 | second line of content
+  10 | tenth line
+ 100 | hundredth line
+```
+
+### FileTime Tracking
+
+The tool records read timestamps via `fileTime.read(filePath)` for conflict detection with the `patch` tool.
+
+## Usage Examples
+
+### Reading a Complete Text File
+
+```typescript
+import { readTool } from "@llm-gateway/ai/tools";
+
+const result = await readTool.execute(
+  { filePath: "/home/user/src/index.ts" },
+  ctx
+);
+
+// result.context:
+// <file path="/home/user/src/index.ts" lines="1-42" total="42">
+//    1 | import { foo } from './foo';
+//    2 | import { bar } from './bar';
+//    3 |
+//    4 | export function main() {
+//   ...
+//   42 | }
+// </file>
+```
+
+### Reading a File in Chunks
+
+```typescript
+// Read first 100 lines
+const chunk1 = await readTool.execute(
+  { filePath: "/home/user/large.log", offset: 0, limit: 100 },
+  ctx
+);
+
+// Read next 100 lines
+const chunk2 = await readTool.execute(
+  { filePath: "/home/user/large.log", offset: 100, limit: 100 },
+  ctx
+);
+```
+
+### Reading an Image
+
+```typescript
+const result = await readTool.execute(
+  { filePath: "/home/user/screenshot.png" },
+  ctx
+);
+
+// result.context: "Read image: /home/user/screenshot.png"
+// result.result: [{
+//   type: "image",
+//   mediaType: "image/png",
+//   data: "iVBORw0KGgoAAAANSUhEUgAA..."
+// }]
+```
+
+### Reading a PDF
+
+```typescript
+const result = await readTool.execute(
+  { filePath: "/home/user/document.pdf" },
+  ctx
+);
+
+// result.context: "Read PDF: /home/user/document.pdf"
+// result.result: [{
+//   type: "document",
+//   mediaType: "application/pdf",
+//   data: "JVBERi0xLjQKJeLjz9MKMyAw..."
+// }]
+```
+
+### Handling Errors
+
+```typescript
+// File not found
+const result = await readTool.execute(
+  { filePath: "/nonexistent.txt" },
+  ctx
+);
+// result.context: "File not found: /nonexistent.txt"
+
+// Binary file
+const result = await readTool.execute(
+  { filePath: "/usr/bin/ls" },
+  ctx
+);
+// result.context: "Cannot read binary file: /usr/bin/ls"
+
+// File too large
+const result = await readTool.execute(
+  { filePath: "/home/user/huge.png" },
+  ctx
+);
+// result.context: "Image file exceeds 5MB limit: /home/user/huge.png"
+```
+
+## Implementation Details
+
+The tool is defined in `packages/ai/tools/read.ts`.
+
+### Schema Definition
+
+```typescript
+const schema = z.object({
+  filePath: z.string().describe("Absolute path to the file to read"),
+  offset: z.number().optional().describe("0-based line number to start reading from"),
+  limit: z.number().optional().describe("Maximum number of lines to read (default 2000)"),
+});
+```
+
+### Constants
+
+```typescript
+const MAX_LINE_LENGTH = 2000;
+const DEFAULT_LIMIT = 2000;
+const MAX_TEXT_BYTES = 50 * 1024; // 50KB
+const MAX_BINARY_BYTES = 5 * 1024 * 1024; // 5MB
+```
+
+### Execute Function Flow
+
+1. Extract file extension
+2. Check file existence and size via `stat`
+3. **If image:** Read, encode base64, return ImageContentPart
+4. **If PDF:** Read, encode base64, return DocumentContentPart
+5. **If text:**
+   - Read file buffer
+   - Check for binary content (null bytes)
+   - Convert to UTF-8 string
+   - Split into lines
+   - Apply offset and limit
+   - Truncate long lines
+   - Format with line numbers
+   - Check 50KB output limit
+   - Wrap in XML with metadata
+6. Record read timestamp via `fileTime.read()`
+7. Return formatted context
+
+## Related Tools
+
+- [patch](/api/tools/patch) - Apply file modifications (uses FileTime for conflict detection)
+- [bash](/api/tools/bash) - Execute commands to locate or process files
+- [agent](/api/tools/agent) - Delegate complex file analysis to subagents
+
+## Related Types
+
+- `ContentPart` - Union type for text, image, and document content
+- `ImageContentPart` - Structure for image data
+- `DocumentContentPart` - Structure for PDF data
+- `FileTime` - Timestamp tracker for read/write conflict detection

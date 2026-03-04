@@ -1,0 +1,404 @@
+---
+title: RLM Harness
+description: Recursive Language Models harness for processing arbitrarily long contexts
+---
+
+## Overview
+
+The RLM (Recursive Language Model) harness treats LLM input as a REPL environment variable, not direct context. The model writes JavaScript to examine, chunk, and recursively process arbitrarily long inputs. It also provides `exec()` for running shell commands, making RLM a general-purpose "model writes code to solve problems" harness.
+
+## Import
+
+```typescript
+import { createRlmHarness } from "@llm-gateway/ai/rlm/harness";
+```
+
+## Function Signature
+
+```typescript
+function createRlmHarness(
+  options: RlmHarnessOptions
+): GeneratorHarnessModule
+```
+
+### Parameters
+
+<ParamField path="options" type="RlmHarnessOptions" required>
+  Configuration for the RLM harness
+  
+  <ParamField path="options.rootHarness" type="GeneratorHarnessModule" required>
+    Provider harness for root LLM calls
+  </ParamField>
+  
+  <ParamField path="options.subHarness" type="GeneratorHarnessModule">
+    Provider harness for sub LLM calls via `llm_query()`. Defaults to rootHarness
+  </ParamField>
+  
+  <ParamField path="options.config" type="RlmConfig" required>
+    RLM configuration object
+    
+    <ParamField path="config.maxIterations" type="number" required>
+      Maximum number of REPL execution loops
+    </ParamField>
+    
+    <ParamField path="config.maxStdoutLength" type="number" required>
+      Maximum stdout length before truncation
+    </ParamField>
+    
+    <ParamField path="config.metadataPrefixLength" type="number" required>
+      Length of context prefix to show in system prompt
+    </ParamField>
+    
+    <ParamField path="config.execTimeout" type="number">
+      Default timeout for exec() calls in seconds (default: 10)
+    </ParamField>
+    
+    <ParamField path="config.execCwd" type="string">
+      Working directory for exec() calls
+    </ParamField>
+    
+    <ParamField path="config.subModel" type="string">
+      Model to use for llm_query() calls
+    </ParamField>
+    
+    <ParamField path="config.subPromptBudget" type="number">
+      Character limit for llm_query() prompts (default: 10000)
+    </ParamField>
+    
+    <ParamField path="config.maxDepth" type="number">
+      Maximum recursion depth for nested RLM calls (default: 2)
+    </ParamField>
+  </ParamField>
+</ParamField>
+
+### Returns
+
+<ResponseField name="GeneratorHarnessModule" type="object">
+  A harness module with `invoke()` and `supportedModels()` methods
+</ResponseField>
+
+## How It Works
+
+1. Extract user prompt from messages, create REPL with prompt as `context`
+2. Build system prompt with metadata only (length, prefix) — model never sees full input
+3. Each iteration:
+   - Stream LLM response (yields `text`/`reasoning`/`usage`)
+   - Extract code from fenced block (exactly one per turn)
+   - Execute in REPL
+   - Yield `repl_input`/`repl_progress`/`repl_output` events
+   - Append stdout/error to message history
+4. If `FINAL()` called → yield final `text` event, break
+5. Yield `harness_end`
+
+## Basic Example
+
+```typescript
+import { createRlmHarness } from "@llm-gateway/ai/rlm/harness";
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/zen";
+
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  config: {
+    maxIterations: 10,
+    maxStdoutLength: 4000,
+    metadataPrefixLength: 200,
+  },
+});
+
+// Process a long document
+const longDocument = await fs.readFile("large-file.txt", "utf-8");
+
+for await (const event of rlm.invoke({
+  model: "claude-sonnet-4-20250514",
+  context: longDocument,  // Document as context, not in messages
+  messages: [{ role: "user", content: "Summarize the key points" }],
+})) {
+  if (event.type === "repl_progress") {
+    console.log(event.chunk);
+  }
+  if (event.type === "text") {
+    console.log("Final answer:", event.content);
+  }
+}
+```
+
+## REPL Functions
+
+The model can use these functions in its code:
+
+### context
+
+The input data as a string variable:
+
+```javascript
+// Model writes:
+console.log(context.length);
+const lines = context.split("\n");
+```
+
+### FINAL(answer)
+
+Signals completion and returns the final answer:
+
+```javascript
+// Model writes:
+FINAL("The document contains 3 main themes...");
+```
+
+### llm_query(prompt, context?)
+
+Make a sub-LLM call to process data:
+
+```javascript
+// Model writes:
+const chunk = context.slice(0, 10000);
+const summary = await llm_query(
+  "Summarize the key points",
+  chunk
+);
+console.log(summary);
+```
+
+### exec(command, timeout?)
+
+Run shell commands:
+
+```javascript
+// Model writes:
+const result = await exec("grep 'error' logfile.txt");
+console.log(result.stdout);
+```
+
+## Events Yielded
+
+### harness_start
+
+Loop begins:
+
+```typescript
+{
+  type: "harness_start",
+  runId: string,
+  depth?: number,              // Recursion depth if > 0
+  maxIterations?: number,
+}
+```
+
+### harness_end
+
+Loop completes:
+
+```typescript
+{
+  type: "harness_end",
+  runId: string,
+  reason?: "final" | "max_iterations",
+  iterations?: number,
+  totalUsage?: { inputTokens: number, outputTokens: number },
+}
+```
+
+### repl_input
+
+Code about to execute:
+
+```typescript
+{
+  type: "repl_input",
+  runId: string,
+  id: string,
+  code: string,
+  iteration?: number,  // Zero-based loop index
+}
+```
+
+### repl_progress
+
+Live output during execution:
+
+```typescript
+{
+  type: "repl_progress",
+  runId: string,
+  id: string,
+  chunk: string,
+  stream: "stdout" | "stderr",
+}
+```
+
+### repl_output
+
+Execution result:
+
+```typescript
+{
+  type: "repl_output",
+  runId: string,
+  id: string,
+  stdout: string,
+  error?: string,
+  done: boolean,           // True if FINAL() was called
+  iteration?: number,
+  durationMs?: number,
+  truncated?: boolean,     // True if stdout was truncated
+}
+```
+
+### text, reasoning, usage
+
+Passed through from provider harness:
+
+```typescript
+{
+  type: "text",
+  runId: string,
+  id: string,
+  content: string,
+}
+```
+
+### relay (permission)
+
+Permission required for exec():
+
+```typescript
+{
+  type: "relay",
+  kind: "permission",
+  runId: string,
+  id: string,
+  toolCallId: string,
+  tool: "exec",
+  params: { command: string },
+  respond: (response: PermissionResponse) => void,
+}
+```
+
+## Permission Control
+
+```typescript
+const permissions = {
+  allowlist: [
+    { tool: "exec", params: { command: "ls*" } },
+    { tool: "exec", params: { command: "cat*" } },
+  ],
+};
+
+for await (const event of rlm.invoke({
+  model: "claude-sonnet-4-20250514",
+  context: largeDataset,
+  messages: [{ role: "user", content: "Analyze the data" }],
+  permissions,
+})) {
+  if (event.type === "relay" && event.kind === "permission") {
+    const approved = await getUserApproval(event.params.command);
+    event.respond({ approved });
+  }
+}
+```
+
+## Recursive RLM
+
+RLM can spawn child RLM sessions via `llm_query()` at depth > 0:
+
+```typescript
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  config: {
+    maxIterations: 10,
+    maxStdoutLength: 4000,
+    metadataPrefixLength: 200,
+    maxDepth: 2,  // Enable 2 levels of recursion
+  },
+});
+
+// Model can write:
+// const summary = await llm_query("Summarize", hugeChunk);
+// This spawns a child RLM session with its own REPL
+```
+
+## Processing Chunks
+
+```typescript
+for await (const event of rlm.invoke({
+  model: "claude-sonnet-4-20250514",
+  context: megabyteDocument,
+  messages: [{ role: "user", content: "Extract all dates mentioned" }],
+})) {
+  if (event.type === "repl_progress") {
+    // Model might write:
+    // const chunks = [];
+    // for (let i = 0; i < context.length; i += 10000) {
+    //   const chunk = context.slice(i, i + 10000);
+    //   const dates = await llm_query("Extract dates", chunk);
+    //   chunks.push(dates);
+    // }
+    console.log(event.chunk);
+  }
+}
+```
+
+## With Shell Commands
+
+```typescript
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness(),
+  config: {
+    maxIterations: 10,
+    maxStdoutLength: 4000,
+    metadataPrefixLength: 200,
+    execTimeout: 30,  // 30 second timeout
+    execCwd: "/path/to/project",
+  },
+});
+
+for await (const event of rlm.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Find all TypeScript files with TODO comments" }],
+})) {
+  // Model might write:
+  // const result = await exec("find . -name '*.ts' -exec grep -l 'TODO' {} \\;");
+  // const files = result.stdout.split("\n").filter(Boolean);
+  // FINAL(`Found ${files.length} files with TODOs`);
+  
+  if (event.type === "repl_output") {
+    console.log("Command output:", event.stdout);
+  }
+}
+```
+
+## Two-Harness Pattern
+
+```typescript
+const rlm = createRlmHarness({
+  rootHarness: createGeneratorHarness({ model: "claude-sonnet-4-20250514" }),
+  subHarness: createGeneratorHarness({ model: "claude-3-5-haiku-20241022" }),  // Faster, cheaper for sub-calls
+  config: {
+    maxIterations: 10,
+    maxStdoutLength: 4000,
+    metadataPrefixLength: 200,
+    subModel: "claude-3-5-haiku-20241022",
+  },
+});
+```
+
+## Architecture
+
+RLM wraps any provider harness and runs an inference loop:
+
+1. Model receives metadata about input (length, prefix)
+2. Model writes code to explore data through sandboxed REPL
+3. Iterates until `FINAL()` or `maxIterations`
+
+Key features:
+- Model never sees full input in context
+- Arbitrary length processing through chunking
+- Recursive sub-queries for complex tasks
+- Shell command execution for system integration
+- Persistent scope across iterations
+
+## Related
+
+- [Agent Harness](/api/harnesses/agent) - Tool execution and permissions
+- [Zen Harness](/api/harnesses/zen) - Default provider
+- [Anthropic Harness](/api/harnesses/anthropic) - Alternative provider

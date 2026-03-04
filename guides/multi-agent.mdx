@@ -1,0 +1,427 @@
+---
+title: Multi-Agent Systems
+description: Orchestrate multiple concurrent agents with shared permissions and relay management
+---
+
+## Overview
+
+The `AgentOrchestrator` manages concurrent agents, multiplexes their event streams, and mediates permission relay flow between agents and consumers. Each agent runs independently with its own message history, but they share a common permission allowlist that grows as humans approve tools with "always".
+
+## Quick Start
+
+<Steps>
+  <Step title="Create an Orchestrator">
+    Instantiate the orchestrator with your harness:
+
+    ```typescript
+    import { AgentOrchestrator } from "@/packages/ai/orchestrator";
+    import { createAgentHarness } from "@/packages/ai/harness/agent";
+    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+    import { bashTool, agentTool } from "@/packages/ai/tools";
+
+    const orchestrator = new AgentOrchestrator(
+      createAgentHarness({ harness: createGeneratorHarness() })
+    );
+    ```
+  </Step>
+
+  <Step title="Spawn Agents">
+    Call `spawn()` to start agents:
+
+    ```typescript
+    const agent1 = orchestrator.spawn({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Analyze the server logs" }],
+      tools: [bashTool],
+    });
+
+    const agent2 = orchestrator.spawn({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Update the documentation" }],
+      tools: [bashTool],
+    });
+
+    console.log(`Spawned agents: ${agent1}, ${agent2}`);
+    ```
+  </Step>
+
+  <Step title="Process Events">
+    Consume multiplexed events from all agents:
+
+    ```typescript
+    for await (const { agentId, event } of orchestrator.events()) {
+      if (event.type === "relay") {
+        // Handle permission request
+        console.log(`Agent ${agentId} needs approval for ${event.tool}`);
+        orchestrator.resolveRelay(event.id, { approved: true });
+      }
+
+      if (event.type === "text") {
+        console.log(`[${agentId}] ${event.content}`);
+      }
+
+      if (event.type === "harness_end") {
+        console.log(`Agent ${agentId} finished`);
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## The Orchestrator API
+
+### Constructor
+
+```typescript
+const orchestrator = new AgentOrchestrator(harness?);
+```
+
+- `harness` (optional): Custom agent harness. Defaults to `createAgentHarness({ harness: createGeneratorHarness() })`.
+
+### spawn(params)
+
+Start a new agent and return its ID:
+
+```typescript
+interface SpawnParams {
+  model?: string;              // Model ID (optional if harness has default)
+  messages: Message[];         // Initial conversation
+  tools?: ToolDefinition[];    // Available tools
+  permissions?: Permissions;   // Agent-specific permissions
+}
+
+const agentId = orchestrator.spawn(params);
+```
+
+### events()
+
+Async iterator yielding multiplexed events:
+
+```typescript
+for await (const { agentId, event } of orchestrator.events()) {
+  // Process event from any agent
+}
+```
+
+Each event includes:
+- `agentId`: Which agent produced this event
+- `event`: The harness event (with `respond` stripped from relay events)
+
+### resolveRelay(relayId, response)
+
+Resolve a pending permission relay:
+
+```typescript
+type ResolveResponse =
+  | { approved: true; always?: boolean }
+  | { approved: false; reason?: string };
+
+orchestrator.resolveRelay(relayId, response);
+```
+
+- `approved: true`: Execute the tool
+- `approved: false`: Reject with optional reason
+- `always: true`: Add derived permission to shared allowlist
+
+### getPendingRelays()
+
+Get all pending relays:
+
+```typescript
+const relays = orchestrator.getPendingRelays();
+for (const [relayId, relay] of relays) {
+  console.log(`${relayId}: ${relay.tool} from agent ${relay.agentId}`);
+}
+```
+
+### cleanup()
+
+Stop all agents and clean up resources:
+
+```typescript
+orchestrator.cleanup();
+```
+
+## Event Multiplexing
+
+The orchestrator uses `AgentMultiplexer` to race events from multiple agents:
+
+```typescript
+for await (const { agentId, event } of orchestrator.events()) {
+  // Events arrive in real-time from whichever agent emits first
+  console.log(`${agentId}: ${event.type}`);
+}
+```
+
+Key behaviors:
+- Events from all agents are interleaved in the order they occur
+- Each event carries its `agentId` for routing
+- Subagent events include `parentId` to preserve the call graph
+
+## Shared Permissions
+
+The orchestrator maintains a shared allowlist that grows as users approve tools with "always":
+
+```typescript
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "relay") {
+    const response = await askUser(
+      `Agent ${agentId} wants to run ${event.tool}. Approve? (y/n/always) `
+    );
+
+    if (response === "always") {
+      // Add to shared allowlist — all agents benefit
+      orchestrator.resolveRelay(event.id, { approved: true, always: true });
+    } else {
+      orchestrator.resolveRelay(event.id, { approved: response === "y" });
+    }
+  }
+}
+```
+
+When `always: true`, the orchestrator:
+1. Calls the tool's `derivePermission()` to get a reusable pattern
+2. Adds it to the shared allowlist
+3. All agents (current and future) auto-approve matching calls
+
+## Agent-Specific Permissions
+
+Each agent can have its own permission overrides:
+
+```typescript
+const agentId = orchestrator.spawn({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Clean up temp files" }],
+  tools: [bashTool],
+  permissions: {
+    allowlist: [{ tool: "bash", params: { command: "rm /tmp/**" } }],
+    deny: [{ tool: "bash", params: { command: "rm -rf /**" } }],
+  },
+});
+```
+
+Permission resolution order:
+1. Agent-specific `deny` → immediate rejection
+2. Shared allowlist (from "always" approvals) → auto-approve
+3. Agent-specific `allowlist` → auto-approve
+4. Agent-specific `allowOnce` → approve once, consume
+5. No match → relay event (pause for human)
+
+## Subagent Spawning
+
+Agents can spawn child agents using the `agent` tool:
+
+```typescript
+import { agentTool, bashTool } from "@/packages/ai/tools";
+
+const parentId = orchestrator.spawn({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Refactor the auth module" }],
+  tools: [bashTool, agentTool],
+});
+
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.parentId) {
+    console.log(`Subagent ${agentId} (parent: ${event.parentId}): ${event.type}`);
+  } else {
+    console.log(`Agent ${agentId}: ${event.type}`);
+  }
+}
+```
+
+Subagent events include `parentId` in every event, forming a directed acyclic graph:
+
+```
+user message
+  └─ parent agent run (text, tool_call, ...)
+       └─ subagent run (text, tool_call, ...)
+       └─ subagent run (text, ...)
+```
+
+## Example: Concurrent Task Execution
+
+```typescript
+import { AgentOrchestrator } from "@/packages/ai/orchestrator";
+import { createAgentHarness } from "@/packages/ai/harness/agent";
+import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+import { bashTool, readTool, patchTool } from "@/packages/ai/tools";
+
+const orchestrator = new AgentOrchestrator(
+  createAgentHarness({ harness: createGeneratorHarness() })
+);
+
+// Spawn three agents for parallel tasks
+const tasks = [
+  "Run the test suite and fix any failures",
+  "Update the README with new API examples",
+  "Refactor the error handling in src/server.ts",
+];
+
+const agentIds = tasks.map((task) =>
+  orchestrator.spawn({
+    model: "glm-4.7",
+    messages: [{ role: "user", content: task }],
+    tools: [bashTool, readTool, patchTool],
+  })
+);
+
+console.log(`Spawned ${agentIds.length} agents`);
+
+const agentStatus = new Map<string, "active" | "complete">();
+agentIds.forEach((id) => agentStatus.set(id, "active"));
+
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "relay") {
+    console.log(`\n⚠️  Agent ${agentId.slice(0, 8)} needs approval:`);
+    console.log(`   Tool: ${event.tool}`);
+    console.log(`   Params:`, event.params);
+
+    // Auto-approve for this example
+    orchestrator.resolveRelay(event.id, { approved: true, always: true });
+  }
+
+  if (event.type === "text") {
+    console.log(`[${agentId.slice(0, 8)}] ${event.content}`);
+  }
+
+  if (event.type === "harness_end") {
+    agentStatus.set(agentId, "complete");
+    console.log(`\n✅ Agent ${agentId.slice(0, 8)} finished\n`);
+
+    // Check if all done
+    if ([...agentStatus.values()].every((s) => s === "complete")) {
+      console.log("All agents complete!");
+      break;
+    }
+  }
+}
+
+orchestrator.cleanup();
+```
+
+## Example: Delegating to Specialists
+
+```typescript
+import { AgentOrchestrator } from "@/packages/ai/orchestrator";
+import { agentTool, bashTool, readTool, patchTool } from "@/packages/ai/tools";
+
+const orchestrator = new AgentOrchestrator();
+
+// Main coordinator agent
+const coordinator = orchestrator.spawn({
+  model: "glm-4.7",
+  messages: [
+    {
+      role: "system",
+      content:
+        "You are a project coordinator. Delegate tasks to specialist agents using the agent tool.",
+    },
+    {
+      role: "user",
+      content: "Prepare the codebase for a new release: run tests, update docs, and bump version.",
+    },
+  ],
+  tools: [agentTool],
+});
+
+const tasksByAgent = new Map<string, string>();
+
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "tool_call" && event.name === "agent") {
+    tasksByAgent.set(agentId, event.input.task);
+    console.log(`\n🚀 Spawning specialist for: ${event.input.task}`);
+  }
+
+  if (event.type === "text") {
+    const task = tasksByAgent.get(agentId);
+    if (task) {
+      console.log(`[${task.slice(0, 30)}...] ${event.content}`);
+    } else {
+      console.log(`[Coordinator] ${event.content}`);
+    }
+  }
+
+  if (event.type === "relay") {
+    orchestrator.resolveRelay(event.id, { approved: true, always: true });
+  }
+
+  if (event.type === "harness_end" && agentId === coordinator) {
+    console.log("\n✅ Coordinator finished!");
+    break;
+  }
+}
+
+orchestrator.cleanup();
+```
+
+## File Timestamp Tracking
+
+The orchestrator maintains a shared `FileTime` tracker to prevent agents from editing stale files:
+
+```typescript
+// Agent 1 reads file.ts (timestamp recorded)
+// Agent 2 writes to file.ts (timestamp updated)
+// Agent 1 tries to patch file.ts → rejected ("file modified since read")
+```
+
+The `read` and `patch` tools automatically coordinate through this shared tracker.
+
+## Lifecycle Management
+
+Agents run until completion:
+
+```typescript
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "harness_start") {
+    console.log(`Agent ${agentId} started`);
+  }
+
+  if (event.type === "harness_end") {
+    console.log(`Agent ${agentId} complete`);
+    // Agent is automatically cleaned up
+  }
+
+  if (event.type === "error") {
+    console.error(`Agent ${agentId} error: ${event.message}`);
+    // Agent stops on error
+  }
+}
+```
+
+Call `cleanup()` to forcibly stop all agents:
+
+```typescript
+process.on("SIGINT", () => {
+  console.log("\nShutting down...");
+  orchestrator.cleanup();
+  process.exit(0);
+});
+```
+
+## Debugging
+
+Enable logging to trace orchestrator internals:
+
+```typescript
+import { setLogLevel } from "@/packages/ai/logger";
+
+setLogLevel("I"); // Info level
+
+const orchestrator = new AgentOrchestrator();
+
+// Logs appear on stderr:
+// [I] spawn agent_id=<uuid> model=glm-4.7
+// [I] relay_created relay_id=<uuid> tool=bash
+// [I] relay_resolved relay_id=<uuid> approved=true
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Human-in-the-Loop" icon="hand" href="/guides/human-in-the-loop">
+    Build permission approval flows
+  </Card>
+  <Card title="Client Rendering" icon="browser" href="/guides/client-rendering">
+    Render agent events in a UI
+  </Card>
+</CardGroup>

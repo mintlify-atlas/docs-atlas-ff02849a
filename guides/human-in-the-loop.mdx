@@ -1,0 +1,485 @@
+---
+title: Human-in-the-Loop
+description: Build permission approval flows for tool execution with relay events
+---
+
+## Overview
+
+LLM Gateway supports human-in-the-loop (HITL) permission approval through relay events. When an agent attempts a tool call that doesn't match the allowlist, it pauses and yields a `relay` event. The consumer can then prompt the user for approval, and the agent resumes based on the response.
+
+## How It Works
+
+Permission checking follows this flow:
+
+<Steps>
+  <Step title="Permission Check">
+    The agent harness checks each tool call against the permission rules:
+
+    ```typescript
+    permissions: {
+      allowlist: [{ tool: "bash", params: { command: "ls **" } }],
+      deny: [{ tool: "bash", params: { command: "rm **" } }],
+    }
+    ```
+
+    - **Match in `deny`**: Tool call rejected immediately
+    - **Match in `allowlist`**: Tool executes automatically
+    - **Match in `allowOnce`**: Tool executes, permission consumed
+    - **No match**: Relay event emitted, agent pauses
+  </Step>
+
+  <Step title="Relay Event">
+    The agent yields a relay event with a `respond()` callback:
+
+    ```typescript
+    {
+      type: "relay",
+      kind: "permission",
+      id: "relay-uuid",
+      runId: "run-uuid",
+      toolCallId: "tool-call-uuid",
+      tool: "bash",
+      params: { command: "git push origin main" },
+      respond: (response) => { /* ... */ }
+    }
+    ```
+  </Step>
+
+  <Step title="User Decision">
+    The consumer prompts the user and calls `respond()`:
+
+    ```typescript
+    const approved = await askUser("Allow git push? (y/n/always) ");
+
+    if (approved === "always") {
+      event.respond({ approved: true, always: true });
+    } else {
+      event.respond({ approved: approved === "y" });
+    }
+    ```
+  </Step>
+
+  <Step title="Resume">
+    The agent resumes:
+
+    - **If approved**: Tool executes, result fed back to agent
+    - **If denied**: Error message fed back, agent continues without executing
+  </Step>
+</Steps>
+
+## CLI Example
+
+Simple command-line approval flow:
+
+```typescript
+import { createAgentHarness } from "@/packages/ai/harness/agent";
+import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+import { bashTool } from "@/packages/ai/tools";
+import * as readline from "readline";
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+const askUser = (question: string): Promise<string> => {
+  return new Promise((resolve) => rl.question(question, resolve));
+};
+
+const agent = createAgentHarness({ harness: createGeneratorHarness() });
+
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Clean up old log files" }],
+  tools: [bashTool],
+  permissions: { allowlist: [] }, // Require approval for everything
+})) {
+  if (event.type === "relay") {
+    console.log(`\n⚠️  Permission Request:`);
+    console.log(`   Tool: ${event.tool}`);
+    console.log(`   Params:`, JSON.stringify(event.params, null, 2));
+
+    const response = await askUser("   Approve? (y/n/always): ");
+    const trimmed = response.trim().toLowerCase();
+
+    if (trimmed === "always") {
+      event.respond({ approved: true, always: true });
+      console.log("   ✅ Approved (always)");
+    } else if (trimmed === "y" || trimmed === "yes") {
+      event.respond({ approved: true });
+      console.log("   ✅ Approved (once)");
+    } else {
+      event.respond({ approved: false, reason: "User denied" });
+      console.log("   ❌ Denied");
+    }
+  }
+
+  if (event.type === "text") {
+    process.stdout.write(event.content);
+  }
+
+  if (event.type === "tool_call") {
+    console.log(`\n📞 Calling ${event.name}`);
+  }
+
+  if (event.type === "tool_result") {
+    console.log(`✅ Result: ${event.output}`);
+  }
+}
+
+rl.close();
+```
+
+## Server-Side with Orchestrator
+
+In a server context, relay resolution happens over HTTP:
+
+<Tabs>
+  <Tab title="Server">
+    The server strips `respond` callbacks and exposes `POST /chat/relay/:relayId`:
+
+    ```typescript
+    import { Hono } from "hono";
+    import { AgentOrchestrator } from "@/packages/ai/orchestrator";
+    import { streamSSE } from "hono/streaming";
+
+    const app = new Hono();
+    const sessions = new Map<string, AgentOrchestrator>();
+
+    app.post("/chat", async (c) => {
+      const { model, messages, tools, permissions } = await c.req.json();
+      const sessionId = crypto.randomUUID();
+      const orchestrator = new AgentOrchestrator();
+      sessions.set(sessionId, orchestrator);
+
+      orchestrator.spawn({ model, messages, tools, permissions });
+
+      return streamSSE(c, async (stream) => {
+        await stream.writeSSE({
+          data: JSON.stringify({ type: "connected", sessionId }),
+        });
+
+        try {
+          for await (const { agentId, event } of orchestrator.events()) {
+            // Strip respond callback from relay events
+            const consumerEvent =
+              event.type === "relay"
+                ? {
+                    type: "relay",
+                    kind: event.kind,
+                    id: event.id,
+                    runId: event.runId,
+                    agentId,
+                    toolCallId: event.toolCallId,
+                    tool: event.tool,
+                    params: event.params,
+                  }
+                : { ...event, agentId };
+
+            await stream.writeSSE({ data: JSON.stringify(consumerEvent) });
+          }
+        } finally {
+          orchestrator.cleanup();
+          sessions.delete(sessionId);
+        }
+      });
+    });
+
+    app.post("/chat/relay/:relayId", async (c) => {
+      const { sessionId, response } = await c.req.json();
+      const relayId = c.req.param("relayId");
+
+      const orchestrator = sessions.get(sessionId);
+      if (!orchestrator) {
+        return c.json({ error: "Session not found" }, 404);
+      }
+
+      orchestrator.resolveRelay(relayId, response);
+      return c.json({ success: true });
+    });
+
+    export default { port: 4000, fetch: app.fetch };
+    ```
+  </Tab>
+
+  <Tab title="Client">
+    The client uses SSE and HTTP transports:
+
+    ```typescript
+    import { createSSETransport, createHTTPTransport } from "@/packages/ai/client";
+
+    const sse = createSSETransport({ baseUrl: "http://localhost:4000" });
+    const http = createHTTPTransport({ baseUrl: "http://localhost:4000" });
+
+    let sessionId: string | null = null;
+
+    for await (const event of sse.stream({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Deploy to production" }],
+      permissions: { allowlist: [] },
+    })) {
+      if (event.type === "connected") {
+        sessionId = event.sessionId;
+        console.log(`Connected: ${sessionId}`);
+      }
+
+      if (event.type === "relay" && sessionId) {
+        console.log(`\n⚠️  Permission request:`);
+        console.log(`   Tool: ${event.tool}`);
+        console.log(`   Params:`, event.params);
+
+        const answer = await askUser("Approve? (y/n/always) ");
+        const always = answer === "always";
+        const approved = always || answer === "y";
+
+        await http.resolveRelay(sessionId, event.id, { approved, always });
+      }
+
+      if (event.type === "text") {
+        process.stdout.write(event.content);
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Always Allow
+
+When a user approves with `always: true`, the orchestrator:
+
+1. Calls the tool's `derivePermission()` to generate a reusable permission pattern
+2. Adds the pattern to the shared allowlist
+3. All future matching calls auto-approve (no more relays)
+
+```typescript
+if (event.type === "relay") {
+  const answer = await askUser("Approve? (y/n/always) ");
+
+  if (answer === "always") {
+    // This tool call + all future similar calls auto-approve
+    event.respond({ approved: true, always: true });
+  }
+}
+```
+
+### Permission Derivation
+
+Tools define how to generalize a specific call:
+
+```typescript
+import { z } from "zod";
+import type { ToolDefinition } from "@/packages/ai/types";
+
+const bashTool: ToolDefinition = {
+  name: "bash",
+  schema: z.object({ command: z.string() }),
+  derivePermission: (params) => {
+    const command = String(params.command ?? "");
+    const spaceIndex = command.indexOf(" ");
+
+    if (spaceIndex === -1) {
+      // No arguments — allow exact command
+      return { tool: "bash", params: { command } };
+    }
+
+    // Has arguments — allow command + glob
+    return {
+      tool: "bash",
+      params: { command: command.slice(0, spaceIndex) + " **" },
+    };
+  },
+  execute: async ({ command }) => {
+    // ...
+  },
+};
+```
+
+Examples:
+- `ls /tmp` → always allow `ls **`
+- `git push origin main` → always allow `git **`
+- `rm file.txt` → always allow `rm **`
+
+## Web UI Example
+
+React component with relay approval:
+
+```typescript
+import { useState, useEffect } from "react";
+import { createSSETransport, createHTTPTransport } from "@/packages/ai/client";
+import type { ServerEvent } from "@/packages/ai/client";
+
+function ChatInterface() {
+  const [events, setEvents] = useState<ServerEvent[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [pendingRelay, setPendingRelay] = useState<ServerEvent | null>(null);
+
+  const sse = createSSETransport({ baseUrl: "/api" });
+  const http = createHTTPTransport({ baseUrl: "/api" });
+
+  const startChat = async (input: string) => {
+    setEvents([]);
+    setSessionId(null);
+
+    for await (const event of sse.stream({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: input }],
+      permissions: { allowlist: [] },
+    })) {
+      setEvents((prev) => [...prev, event]);
+
+      if (event.type === "connected") {
+        setSessionId(event.sessionId);
+      }
+
+      if (event.type === "relay") {
+        setPendingRelay(event);
+      }
+    }
+  };
+
+  const handleApprove = async (always: boolean) => {
+    if (!pendingRelay || !sessionId) return;
+
+    await http.resolveRelay(sessionId, pendingRelay.id, {
+      approved: true,
+      always,
+    });
+
+    setPendingRelay(null);
+  };
+
+  const handleDeny = async () => {
+    if (!pendingRelay || !sessionId) return;
+
+    await http.resolveRelay(sessionId, pendingRelay.id, {
+      approved: false,
+      reason: "User denied",
+    });
+
+    setPendingRelay(null);
+  };
+
+  return (
+    <div>
+      <button onClick={() => startChat("Deploy to staging")}>Start</button>
+
+      <div className="events">
+        {events.map((event, i) => (
+          <div key={i}>
+            {event.type === "text" && <p>{event.content}</p>}
+            {event.type === "tool_call" && <p>📞 {event.name}</p>}
+          </div>
+        ))}
+      </div>
+
+      {pendingRelay && (
+        <div className="modal">
+          <h3>⚠️ Permission Required</h3>
+          <p>Tool: {pendingRelay.tool}</p>
+          <pre>{JSON.stringify(pendingRelay.params, null, 2)}</pre>
+          <button onClick={() => handleApprove(false)}>Approve Once</button>
+          <button onClick={() => handleApprove(true)}>Always Allow</button>
+          <button onClick={handleDeny}>Deny</button>
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+## Deny with Reason
+
+Provide feedback when denying:
+
+```typescript
+if (event.type === "relay") {
+  const approved = await askUser("Approve? (y/n) ");
+
+  if (approved === "n") {
+    event.respond({
+      approved: false,
+      reason: "Operation too risky. Try a safer approach.",
+    });
+  } else {
+    event.respond({ approved: true });
+  }
+}
+```
+
+The agent receives:
+
+```
+Tool execution denied: Operation too risky. Try a safer approach.
+```
+
+## Pre-Approvals
+
+Set up common permissions ahead of time:
+
+```typescript
+const agent = createAgentHarness({ harness: createGeneratorHarness() });
+
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Run the test suite" }],
+  tools: [bashTool, readTool],
+  permissions: {
+    allowlist: [
+      { tool: "bash", params: { command: "npm **" } },
+      { tool: "bash", params: { command: "bun **" } },
+      { tool: "read" },
+    ],
+  },
+})) {
+  // No relay events for npm/bun commands or read operations
+}
+```
+
+## Dangerous Operations
+
+Explicitly deny dangerous patterns:
+
+```typescript
+permissions: {
+  deny: [
+    { tool: "bash", params: { command: "rm -rf /**" } },
+    { tool: "bash", params: { command: "sudo **" } },
+    { tool: "bash", params: { command: "dd **" } },
+  ],
+  allowlist: [{ tool: "bash" }],
+}
+```
+
+Denied calls are rejected immediately without a relay event.
+
+## Timeout Handling
+
+Implement timeouts for relay approvals:
+
+```typescript
+const RELAY_TIMEOUT = 60000; // 60 seconds
+
+for await (const event of agent.invoke(params)) {
+  if (event.type === "relay") {
+    const timeoutId = setTimeout(() => {
+      event.respond({ approved: false, reason: "Approval timeout" });
+    }, RELAY_TIMEOUT);
+
+    const approved = await askUser("Approve? (y/n) ");
+    clearTimeout(timeoutId);
+
+    event.respond({ approved: approved === "y" });
+  }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Client Rendering" icon="browser" href="/guides/client-rendering">
+    Build UIs that render agent events
+  </Card>
+  <Card title="Multi-Agent" icon="users" href="/guides/multi-agent">
+    Orchestrate concurrent agents with shared permissions
+  </Card>
+</CardGroup>

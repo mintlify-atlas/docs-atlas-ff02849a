@@ -1,0 +1,267 @@
+---
+title: Introduction
+description: Welcome to LLM Gateway - a composable agent framework built on async generator harnesses
+mode: custom
+---
+
+<div className="relative overflow-hidden dark:bg-[#0f1117] bg-white py-20">
+  <div className="max-w-6xl mx-auto px-6">
+    <div className="grid lg:grid-cols-2 gap-12 items-center">
+      <div>
+        <h1 className="text-5xl lg:text-6xl font-bold dark:text-white text-gray-900 mb-6">
+          Build AI agents with composable harnesses
+        </h1>
+        <p className="text-xl dark:text-gray-400 text-gray-600 max-w-2xl mb-8">
+          LLM Gateway is an agent framework built on three simple ideas: a harness yields events, harnesses compose, and events form a graph.
+        </p>
+        <div className="flex flex-wrap gap-4">
+          <a
+            href="/quickstart"
+            className="inline-flex items-center px-6 py-3 rounded-lg font-semibold bg-[#4595db] text-white hover:bg-[#3a7fc5] transition-colors"
+          >
+            Get Started
+          </a>
+          <a
+            href="/concepts/harnesses"
+            className="inline-flex items-center px-6 py-3 rounded-lg font-semibold border dark:border-white/30 dark:bg-white/10 dark:text-white border-gray-300 bg-gray-50 text-gray-900 dark:hover:border-[#4595db] hover:border-[#4595db] transition-colors"
+          >
+            Learn Core Concepts
+          </a>
+        </div>
+      </div>
+      <div className="hidden lg:block">
+        <div className="dark:bg-[#1a1d27] bg-gray-50 rounded-2xl p-6 dark:border-[#27272a] border-gray-200 border">
+          <pre className="text-sm dark:text-gray-300 text-gray-800 overflow-x-auto">
+{`import { createAgentHarness } from "./harness/agent";
+import { createGeneratorHarness } from "./harness/providers/zen";
+import { bashTool } from "./tools";
+
+const agent = createAgentHarness({ 
+  harness: createGeneratorHarness() 
+});
+
+for await (const event of agent.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "List files" }],
+  tools: [bashTool],
+  permissions: { allowlist: [{ tool: "bash" }] }
+})) {
+  if (event.type === "text") 
+    process.stdout.write(event.content);
+}`}
+          </pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold dark:text-white text-gray-900 mb-4">
+    Key Features
+  </h2>
+  <p className="text-base dark:text-gray-400 text-gray-600 mb-8">
+    Everything you need to build production-ready AI agents
+  </p>
+
+  <CardGroup cols={3}>
+    <Card title="Composable Harnesses" icon="layer-group" href="/concepts/composition">
+      Wrap harnesses around harnesses to layer behavior without changing the interface
+    </Card>
+    <Card title="Multi-Agent Orchestration" icon="users" href="/guides/multi-agent">
+      Run multiple agents concurrently with built-in multiplexing and event coordination
+    </Card>
+    <Card title="Event-Driven Architecture" icon="bolt" href="/concepts/events">
+      Stream fine-grained events that form an immutable conversation graph
+    </Card>
+    <Card title="Multiple LLM Providers" icon="globe" href="/api/harnesses/zen">
+      Built-in support for Zen, Anthropic, OpenAI, and OpenRouter with unified interface
+    </Card>
+    <Card title="Human-in-the-Loop" icon="hand" href="/guides/human-in-the-loop">
+      Permission system with glob-pattern matching and relay-based approval flow
+    </Card>
+    <Card title="Recursive Processing" icon="arrows-rotate" href="/guides/recursive-language-model">
+      RLM harness gives models a REPL to explore and process arbitrarily long inputs
+    </Card>
+  </CardGroup>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold dark:text-white text-gray-900 mb-4">
+    Quick Start
+  </h2>
+  <p className="text-base dark:text-gray-400 text-gray-600 mb-8">
+    Get up and running in minutes
+  </p>
+
+  <Steps>
+    <Step title="Install dependencies">
+      LLM Gateway uses Bun as its runtime and package manager.
+
+      ```bash
+      bun install
+      ```
+
+      Copy the environment example file and configure your API keys:
+
+      ```bash
+      cp .env.example .env
+      ```
+    </Step>
+
+    <Step title="Stream your first LLM call">
+      A provider harness is all you need to stream an LLM response.
+
+      ```typescript
+      import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+
+      const harness = createGeneratorHarness();
+
+      for await (const event of harness.invoke({
+        model: "glm-4.7",
+        messages: [{ role: "user", content: "What is 2+2?" }],
+      })) {
+        if (event.type === "text") process.stdout.write(event.content);
+      }
+      ```
+    </Step>
+
+    <Step title="Add tool calling">
+      Wrap a provider with the agent harness to enable agentic tool-calling loops.
+
+      ```typescript
+      import { createAgentHarness } from "./packages/ai/harness/agent";
+      import { bashTool } from "./packages/ai/tools";
+
+      const agent = createAgentHarness({ harness: createGeneratorHarness() });
+
+      for await (const event of agent.invoke({
+        model: "glm-4.7",
+        messages: [{ role: "user", content: "List the files in this directory" }],
+        tools: [bashTool],
+        permissions: { allowlist: [{ tool: "bash" }] }
+      })) {
+        if (event.type === "tool_call") console.log(`[calling ${event.name}]`);
+        if (event.type === "text") process.stdout.write(event.content);
+      }
+      ```
+    </Step>
+
+    <Step title="Explore the architecture">
+      Dive deeper into the core concepts:
+
+      - [Harnesses](/concepts/harnesses) - The fundamental async generator primitive
+      - [Events](/concepts/events) - The event types that flow through the system
+      - [Composition](/concepts/composition) - How harnesses wrap and layer behavior
+      - [Conversation Graph](/concepts/conversation-graph) - How events form an immutable graph
+    </Step>
+  </Steps>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <h2 className="text-3xl font-bold dark:text-white text-gray-900 mb-4">
+    Explore by Use Case
+  </h2>
+  <p className="text-base dark:text-gray-400 text-gray-600 mb-8">
+    Pick the components you need for your use case
+  </p>
+
+  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <a
+      href="/guides/streaming-llm"
+      className="group block rounded-2xl dark:border-[#27272a] border-gray-200 border dark:hover:border-[#4595db] hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="dark:bg-[#1a1d27] bg-gray-50 p-6">
+        <h3 className="text-lg font-semibold dark:text-white text-gray-900 mb-2 flex items-center gap-2">
+          <span className="text-[#4595db]">→</span>
+          Stream an LLM call
+        </h3>
+        <p className="text-sm dark:text-gray-400 text-gray-600 mb-3">
+          Use a provider harness to stream responses from any LLM with a unified interface.
+        </p>
+        <div className="text-sm font-medium dark:text-gray-300 text-gray-700 group-hover:text-[#4595db] transition-colors">
+          Read guide
+        </div>
+      </div>
+    </a>
+
+    <a
+      href="/guides/tool-calling"
+      className="group block rounded-2xl dark:border-[#27272a] border-gray-200 border dark:hover:border-[#4595db] hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="dark:bg-[#1a1d27] bg-gray-50 p-6">
+        <h3 className="text-lg font-semibold dark:text-white text-gray-900 mb-2 flex items-center gap-2">
+          <span className="text-[#4595db]">→</span>
+          Single agent with tools
+        </h3>
+        <p className="text-sm dark:text-gray-400 text-gray-600 mb-3">
+          Wrap a provider with the agent harness to get an agentic loop with built-in tool execution.
+        </p>
+        <div className="text-sm font-medium dark:text-gray-300 text-gray-700 group-hover:text-[#4595db] transition-colors">
+          Read guide
+        </div>
+      </div>
+    </a>
+
+    <a
+      href="/guides/multi-agent"
+      className="group block rounded-2xl dark:border-[#27272a] border-gray-200 border dark:hover:border-[#4595db] hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="dark:bg-[#1a1d27] bg-gray-50 p-6">
+        <h3 className="text-lg font-semibold dark:text-white text-gray-900 mb-2 flex items-center gap-2">
+          <span className="text-[#4595db]">→</span>
+          Multi-agent orchestration
+        </h3>
+        <p className="text-sm dark:text-gray-400 text-gray-600 mb-3">
+          Use the orchestrator to manage concurrent agents and coordinate permission relays.
+        </p>
+        <div className="text-sm font-medium dark:text-gray-300 text-gray-700 group-hover:text-[#4595db] transition-colors">
+          Read guide
+        </div>
+      </div>
+    </a>
+
+    <a
+      href="/guides/client-rendering"
+      className="group block rounded-2xl dark:border-[#27272a] border-gray-200 border dark:hover:border-[#4595db] hover:border-[#4595db] overflow-hidden no-underline transition-colors"
+    >
+      <div className="dark:bg-[#1a1d27] bg-gray-50 p-6">
+        <h3 className="text-lg font-semibold dark:text-white text-gray-900 mb-2 flex items-center gap-2">
+          <span className="text-[#4595db]">→</span>
+          Client-side rendering
+        </h3>
+        <p className="text-sm dark:text-gray-400 text-gray-600 mb-3">
+          Use graph projections to render threaded conversations with nested subagent branches.
+        </p>
+        <div className="text-sm font-medium dark:text-gray-300 text-gray-700 group-hover:text-[#4595db] transition-colors">
+          Read guide
+        </div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<div className="mt-16 mb-16 max-w-5xl mx-auto px-6">
+  <div className="dark:bg-[#1a1d27] bg-gray-50 rounded-2xl p-8 dark:border-[#27272a] border-gray-200 border">
+    <h2 className="text-2xl font-bold dark:text-white text-gray-900 mb-4">
+      Ready to build?
+    </h2>
+    <p className="text-base dark:text-gray-400 text-gray-600 mb-6">
+      Start with the quickstart guide or dive into the API reference to explore all available harnesses, tools, and utilities.
+    </p>
+    <div className="flex flex-wrap gap-4">
+      <a
+        href="/quickstart"
+        className="inline-flex items-center px-6 py-3 rounded-lg font-semibold bg-[#4595db] text-white hover:bg-[#3a7fc5] transition-colors"
+      >
+        Quickstart Guide
+      </a>
+      <a
+        href="/api/harnesses/agent"
+        className="inline-flex items-center px-6 py-3 rounded-lg font-semibold dark:border-white/30 dark:bg-white/10 dark:text-white border-gray-300 bg-white text-gray-900 border dark:hover:border-[#4595db] hover:border-[#4595db] transition-colors"
+      >
+        API Reference
+      </a>
+    </div>
+  </div>
+</div>

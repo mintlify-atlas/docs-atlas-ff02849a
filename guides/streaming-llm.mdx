@@ -1,0 +1,324 @@
+---
+title: Streaming LLM Calls
+description: Stream text and reasoning from LLM providers with real-time token delivery
+---
+
+## Overview
+
+LLM Gateway provides streaming LLM calls through provider harnesses. Each harness implements a simple async generator interface that yields events as tokens arrive from the API.
+
+## Quick Start
+
+<Steps>
+  <Step title="Choose a Provider">
+    Select from available providers: `zen` (OpenAI-compatible), `anthropic`, `openai`, or `openrouter`.
+
+    ```typescript
+    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+
+    const harness = createGeneratorHarness();
+    ```
+  </Step>
+
+  <Step title="Invoke the Harness">
+    Call `invoke()` with your model and messages:
+
+    ```typescript
+    for await (const event of harness.invoke({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "What is the sum of the first 10 primes?" }],
+    })) {
+      if (event.type === "text") {
+        process.stdout.write(event.content);
+      }
+    }
+    ```
+  </Step>
+
+  <Step title="Handle Events">
+    Process different event types as they stream:
+
+    ```typescript
+    for await (const event of harness.invoke(params)) {
+      switch (event.type) {
+        case "harness_start":
+          console.log("Stream started");
+          break;
+        case "text":
+          process.stdout.write(event.content);
+          break;
+        case "reasoning":
+          process.stderr.write(event.content);
+          break;
+        case "usage":
+          console.log(`Tokens: ${event.inputTokens} in, ${event.outputTokens} out`);
+          break;
+        case "harness_end":
+          console.log("\nStream complete");
+          break;
+      }
+    }
+    ```
+  </Step>
+</Steps>
+
+## Event Types
+
+Provider harnesses yield these events:
+
+| Event | Description | Fields |
+|-------|-------------|--------|
+| `harness_start` | Stream begins | `runId` |
+| `text` | Streamed text token | `id`, `runId`, `content` |
+| `reasoning` | Streamed reasoning token | `id`, `runId`, `content` |
+| `tool_call` | Model requested tool | `id`, `runId`, `name`, `input` |
+| `usage` | Token usage stats | `runId`, `inputTokens`, `outputTokens` |
+| `error` | Error occurred | `runId`, `message` |
+| `harness_end` | Stream complete | `runId` |
+
+## Provider-Specific Configuration
+
+<Tabs>
+  <Tab title="Zen (OpenAI-compatible)">
+    The Zen provider works with OpenAI-compatible APIs and supports reasoning content:
+
+    ```typescript
+    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+
+    const harness = createGeneratorHarness({
+      apiKey: process.env.ZEN_API_KEY,
+      baseUrl: process.env.ZEN_BASE_URL,
+    });
+
+    for await (const event of harness.invoke({
+      model: "glm-4.7",
+      messages: [{ role: "user", content: "Explain quantum computing" }],
+    })) {
+      if (event.type === "reasoning") {
+        // Model's internal thinking
+        console.error("[thinking]", event.content);
+      }
+      if (event.type === "text") {
+        // Final output
+        process.stdout.write(event.content);
+      }
+    }
+    ```
+  </Tab>
+
+  <Tab title="Anthropic">
+    Use Claude models directly:
+
+    ```typescript
+    import { createAnthropicHarness } from "@/packages/ai/harness/providers/anthropic";
+
+    const harness = createAnthropicHarness({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+
+    for await (const event of harness.invoke({
+      model: "claude-3-5-sonnet-20241022",
+      messages: [{ role: "user", content: "Write a haiku about code" }],
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+    }
+    ```
+  </Tab>
+
+  <Tab title="OpenAI">
+    Access OpenAI models:
+
+    ```typescript
+    import { createOpenAIHarness } from "@/packages/ai/harness/providers/openai";
+
+    const harness = createOpenAIHarness({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+
+    for await (const event of harness.invoke({
+      model: "gpt-4",
+      messages: [{ role: "user", content: "Hello!" }],
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+    }
+    ```
+  </Tab>
+
+  <Tab title="OpenRouter">
+    Access multiple providers through OpenRouter:
+
+    ```typescript
+    import { createOpenRouterHarness } from "@/packages/ai/harness/providers/openrouter";
+
+    const harness = createOpenRouterHarness({
+      apiKey: process.env.OPENROUTER_API_KEY,
+    });
+
+    for await (const event of harness.invoke({
+      model: "anthropic/claude-3-5-sonnet",
+      messages: [{ role: "user", content: "Hello!" }],
+    })) {
+      if (event.type === "text") process.stdout.write(event.content);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Reasoning vs Text
+
+Models that support extended thinking (like DeepSeek, o1) emit separate streams:
+
+- **`reasoning` events**: Internal model thinking process (not part of final answer)
+- **`text` events**: Final output tokens
+
+```typescript
+for await (const event of harness.invoke({
+  model: "deepseek-reasoner",
+  messages: [{ role: "user", content: "Solve this: 2x + 5 = 15" }],
+})) {
+  if (event.type === "reasoning") {
+    // "Let me work through this step by step..."
+    console.error("💭", event.content);
+  }
+  if (event.type === "text") {
+    // "x = 5"
+    console.log("✨", event.content);
+  }
+}
+```
+
+## Message History
+
+Build multi-turn conversations by accumulating messages:
+
+```typescript
+const messages = [
+  { role: "user" as const, content: "What is TypeScript?" }
+];
+
+let response = "";
+
+for await (const event of harness.invoke({ model: "glm-4.7", messages })) {
+  if (event.type === "text") {
+    response += event.content;
+    process.stdout.write(event.content);
+  }
+}
+
+// Add assistant response to history
+messages.push({ role: "assistant", content: response });
+
+// Follow-up question
+messages.push({ role: "user", content: "How does it compare to JavaScript?" });
+
+for await (const event of harness.invoke({ model: "glm-4.7", messages })) {
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+## System Prompts
+
+Include system messages to set behavior:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "glm-4.7",
+  messages: [
+    {
+      role: "system",
+      content: "You are a helpful assistant that responds in haiku format."
+    },
+    { role: "user", content: "Explain recursion" }
+  ],
+})) {
+  if (event.type === "text") process.stdout.write(event.content);
+}
+```
+
+## Error Handling
+
+Handle errors gracefully:
+
+```typescript
+try {
+  for await (const event of harness.invoke({
+    model: "glm-4.7",
+    messages: [{ role: "user", content: "Hello" }],
+  })) {
+    if (event.type === "error") {
+      console.error("Stream error:", event.message);
+      break;
+    }
+    if (event.type === "text") {
+      process.stdout.write(event.content);
+    }
+  }
+} catch (error) {
+  console.error("Fatal error:", error);
+}
+```
+
+## Tracking Token Usage
+
+Accumulate token counts across the stream:
+
+```typescript
+let totalInputTokens = 0;
+let totalOutputTokens = 0;
+
+for await (const event of harness.invoke({
+  model: "glm-4.7",
+  messages: [{ role: "user", content: "Write a story" }],
+})) {
+  if (event.type === "usage") {
+    totalInputTokens += event.inputTokens || 0;
+    totalOutputTokens += event.outputTokens || 0;
+  }
+  if (event.type === "text") {
+    process.stdout.write(event.content);
+  }
+}
+
+console.log(`\nTotal tokens: ${totalInputTokens} in, ${totalOutputTokens} out`);
+```
+
+## Run IDs and Provenance
+
+Every event carries a `runId` that identifies the LLM invocation:
+
+```typescript
+for await (const event of harness.invoke(params)) {
+  console.log(`[${event.runId}] ${event.type}`);
+
+  if (event.parentId) {
+    console.log(`  ↳ spawned by ${event.parentId}`);
+  }
+}
+```
+
+This becomes important when composing harnesses — each nested call gets its own `runId`, and child runs include `parentId` to preserve the call graph.
+
+## Composition
+
+Provider harnesses compose with other harnesses. See the [Tool Calling](/guides/tool-calling) and [Multi-Agent](/guides/multi-agent) guides for wrapping providers with agentic capabilities.
+
+```typescript
+import { createAgentHarness } from "@/packages/ai/harness/agent";
+import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+
+const provider = createGeneratorHarness();
+const agent = createAgentHarness({ harness: provider });
+
+// agent.invoke() now includes tool execution
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Tool Calling" icon="wrench" href="/guides/tool-calling">
+    Add tools to let the model execute actions
+  </Card>
+  <Card title="Multi-Agent" icon="users" href="/guides/multi-agent">
+    Orchestrate multiple concurrent agents
+  </Card>
+</CardGroup>

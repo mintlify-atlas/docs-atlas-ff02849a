@@ -1,122 +1,139 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "LLM Gateway",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#4595db",
+    "light": "#5ebf9e",
+    "dark": "#0494dc"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "/favicon.png",
+  "logo": {
+    "light": "/logo-light.svg",
+    "dark": "/logo-dark.png"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/hvent90/llm-gateway"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/hvent90/llm-gateway"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/harnesses",
+              "concepts/events",
+              "concepts/composition",
+              "concepts/conversation-graph",
+              "concepts/permissions"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Guides",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "guides/streaming-llm",
+              "guides/tool-calling",
+              "guides/multi-agent",
+              "guides/human-in-the-loop",
+              "guides/client-rendering",
+              "guides/recursive-language-model"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Building Extensions",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "extensions/custom-provider",
+              "extensions/custom-tool",
+              "extensions/custom-harness",
+              "extensions/custom-projection"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/server-setup",
+              "deployment/configuration",
+              "deployment/environment-variables"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Harnesses",
             "pages": [
-              "api-reference/introduction"
+              "api/harnesses/agent",
+              "api/harnesses/zen",
+              "api/harnesses/anthropic",
+              "api/harnesses/openai",
+              "api/harnesses/openrouter",
+              "api/harnesses/rlm"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Orchestration",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/orchestrator",
+              "api/multiplexer",
+              "api/permissions"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "api/tools/bash",
+              "api/tools/agent",
+              "api/tools/read",
+              "api/tools/patch"
+            ]
+          },
+          {
+            "group": "Client Library",
+            "pages": [
+              "api/client/conversation",
+              "api/client/graph",
+              "api/client/projections",
+              "api/client/transports"
+            ]
+          },
+          {
+            "group": "Types & Primitives",
+            "pages": [
+              "api/types",
+              "api/primitives"
+            ]
+          },
+          {
+            "group": "HTTP API",
+            "pages": [
+              "api/http/overview",
+              "api/http/chat",
+              "api/http/models",
+              "api/http/relay"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

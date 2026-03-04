@@ -1,0 +1,543 @@
+---
+title: Events
+description: Fine-grained event types that stream through harnesses and form the conversation graph
+icon: bolt
+---
+
+## Overview
+
+Events are the units of information that flow through harnesses. Every harness invocation yields a sequence of events — from streaming text chunks to tool calls to usage metrics. Events form an immutable log that can be reduced into a conversation graph.
+
+All events carry two fields for graph construction:
+
+<ParamField path="runId" type="string" required>
+  Identifies the harness run that produced this event. Each agent invocation gets a unique `runId` (a UUID v7).
+</ParamField>
+
+<ParamField path="parentId" type="string">
+  Links this event to its parent. For subagents, `parentId` is the tool call ID that spawned them. For top-level agents, `parentId` is undefined.
+</ParamField>
+
+## Event types
+
+Events are defined as a discriminated union in `packages/ai/types.ts:77`. The `type` field determines which other fields are present.
+
+### Content events
+
+These events carry the actual LLM output:
+
+<Tabs>
+  <Tab title="text">
+    A chunk of streamed text content from the model.
+
+    ```typescript
+    {
+      type: "text",
+      runId: string,
+      parentId?: string,
+      id: string,        // Stable across chunks of the same text stream
+      content: string    // The text fragment
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    let fullText = "";
+    for await (const event of harness.invoke(params)) {
+      if (event.type === "text") {
+        fullText += event.content;
+        process.stdout.write(event.content);
+      }
+    }
+    ```
+
+    **Emitted by:** Provider harnesses (e.g., `harness/providers/zen.ts:269`)  
+    **Passthrough:** Agent harness re-yields text events with provider's `runId`
+  </Tab>
+
+  <Tab title="reasoning">
+    A chunk of streamed reasoning or chain-of-thought content (provider-dependent).
+
+    ```typescript
+    {
+      type: "reasoning",
+      runId: string,
+      parentId?: string,
+      id: string,        // Stable across chunks of the same reasoning block
+      content: string    // The reasoning fragment
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    for await (const event of harness.invoke(params)) {
+      if (event.type === "reasoning") {
+        console.log("[thinking]", event.content);
+      }
+    }
+    ```
+
+    **Supported by:** Zen (via `reasoning_content`), models that expose chain-of-thought  
+    **Emitted by:** Provider harnesses that support reasoning (e.g., `harness/providers/zen.ts:259`)
+  </Tab>
+</Tabs>
+
+### Tool events
+
+These events track tool call requests and results:
+
+<Tabs>
+  <Tab title="tool_call">
+    The model is requesting a tool invocation.
+
+    ```typescript
+    {
+      type: "tool_call",
+      runId: string,
+      parentId?: string,
+      id: string,        // Tool call identifier (namespaced by agent)
+      name: string,      // Tool name
+      input: unknown     // Parsed arguments (or { __toolParseError, parseError, rawArguments } on malformed JSON)
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "tool_call") {
+        console.log(`Calling ${event.name} with`, event.input);
+      }
+    }
+    ```
+
+    **Emitted by:**
+    - Provider harnesses yield raw tool calls after the stream ends
+    - Agent harness re-yields approved calls with namespaced IDs (format: `{agentRunId}/{rawId}`)
+
+    <Warning>
+    If the model emits malformed JSON for tool arguments, `input` will be an object with `__toolParseError: true`, `parseError`, and `rawArguments` fields. The agent harness will yield a `tool_result` with the error and continue.
+    </Warning>
+  </Tab>
+
+  <Tab title="tool_result">
+    Result of executing a tool.
+
+    ```typescript
+    {
+      type: "tool_result",
+      runId: string,
+      parentId?: string,
+      id: string,        // Matches the tool_call id
+      name: string,      // Tool name
+      output: unknown    // { context, result } on success
+                          // { status: "denied", reason } on denial
+                          // { error } on failure
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "tool_result") {
+        if (event.output.error) {
+          console.error(`Tool ${event.name} failed:`, event.output.error);
+        } else if (event.output.status === "denied") {
+          console.log(`Tool ${event.name} was denied:`, event.output.reason);
+        } else {
+          console.log(`Tool ${event.name} result:`, event.output.context);
+        }
+      }
+    }
+    ```
+
+    **Emitted by:** Agent harness only (`harness/agent.ts:193`, `harness/agent.ts:280`)
+  </Tab>
+
+  <Tab title="tool_progress">
+    Live progress updates during long-running tool execution.
+
+    ```typescript
+    {
+      type: "tool_progress",
+      runId: string,
+      parentId?: string,
+      id: string,
+      toolCallId: string,  // The tool call this progress belongs to
+      name: string,        // Tool name
+      content: unknown     // Progress data (format depends on tool)
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "tool_progress") {
+        console.log(`[${event.name}]`, event.content);
+      }
+    }
+    ```
+
+    **Emitted by:** Tools that report progress (e.g., bash tool streaming stdout)
+  </Tab>
+</Tabs>
+
+### Lifecycle events
+
+<Tabs>
+  <Tab title="harness_start">
+    Marks the beginning of a harness run.
+
+    ```typescript
+    {
+      type: "harness_start",
+      runId: string,
+      parentId?: string,
+      depth?: number,         // Recursion depth for nested RLM sessions
+      maxIterations?: number  // Configured iteration limit
+    }
+    ```
+
+    **Emitted by:** Agent harness (`harness/agent.ts:51`), RLM harness
+  </Tab>
+
+  <Tab title="harness_end">
+    Marks the end of a harness run. Emitted on normal completion, error, or max iterations.
+
+    ```typescript
+    {
+      type: "harness_end",
+      runId: string,
+      parentId?: string,
+      reason?: "final" | "max_iterations",  // Optional, RLM only
+      iterations?: number,                   // Number of REPL iterations completed
+      totalUsage?: {                         // Aggregate token usage
+        inputTokens: number,
+        outputTokens: number
+      }
+    }
+    ```
+
+    **Emitted by:** Agent harness (`harness/agent.ts:99`, `harness/agent.ts:122`, `harness/agent.ts:325`), RLM harness
+  </Tab>
+</Tabs>
+
+### System events
+
+<Tabs>
+  <Tab title="usage">
+    Token usage for one LLM call.
+
+    ```typescript
+    {
+      type: "usage",
+      runId: string,
+      parentId?: string,
+      inputTokens: number,        // Prompt tokens consumed
+      outputTokens: number,       // Completion tokens generated
+      cacheReadTokens?: number,   // Tokens read from cache
+      cacheCreationTokens?: number // Tokens written to cache
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    let totalInput = 0, totalOutput = 0;
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "usage") {
+        totalInput += event.inputTokens;
+        totalOutput += event.outputTokens;
+      }
+    }
+    console.log(`Total: ${totalInput} in / ${totalOutput} out`);
+    ```
+
+    **Emitted by:** Provider harnesses (e.g., `harness/providers/zen.ts:325`)  
+    **Passthrough:** Agent harness re-yields usage events
+  </Tab>
+
+  <Tab title="error">
+    An error occurred during invocation.
+
+    ```typescript
+    {
+      type: "error",
+      runId: string,
+      parentId?: string,
+      error: Error  // The error instance
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "error") {
+        console.error(`Error in ${event.runId}:`, event.error.message);
+      }
+    }
+    ```
+
+    **Emitted by:** Both provider and agent harnesses
+    - Provider: API/stream errors (e.g., `harness/providers/zen.ts:203`)
+    - Agent: Tool execution errors, missing executors (e.g., `harness/agent.ts:245`)
+  </Tab>
+
+  <Tab title="relay">
+    A permission request that pauses the harness until resolved.
+
+    ```typescript
+    {
+      type: "relay",
+      kind: "permission",         // Extensible to other relay kinds
+      runId: string,
+      id: string,
+      parentId?: string,
+      toolCallId: string,         // The namespaced tool call ID
+      tool: string,               // Tool name
+      params: Record<string, unknown>,  // Tool arguments
+      respond: (response: PermissionResponse) => void  // Callback to approve/deny
+    }
+    ```
+
+    **Example:**
+    ```typescript
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "relay" && event.kind === "permission") {
+        const approved = await askUser(`Allow ${event.tool}?`);
+        event.respond({ approved, reason: approved ? undefined : "User denied" });
+      }
+    }
+    ```
+
+    **Emitted by:** Agent harness only (`harness/agent.ts:169`)  
+    **Behavior:** The generator pauses until `respond()` is called via a deferred promise
+
+    <Warning>
+    The `respond` callback is stripped from relay events when they pass through the orchestrator. Use `resolveRelay()` on the orchestrator instead.
+    </Warning>
+  </Tab>
+</Tabs>
+
+### RLM events
+
+These events are specific to the Recursive Language Model harness:
+
+<Tabs>
+  <Tab title="repl_input">
+    Code extracted from the model's response, about to be executed.
+
+    ```typescript
+    {
+      type: "repl_input",
+      runId: string,
+      id: string,
+      parentId?: string,
+      code: string,       // The JavaScript code to execute
+      iteration?: number  // Zero-based loop index
+    }
+    ```
+  </Tab>
+
+  <Tab title="repl_progress">
+    Live output streamed during REPL execution.
+
+    ```typescript
+    {
+      type: "repl_progress",
+      runId: string,
+      id: string,
+      parentId?: string,
+      chunk: string,              // The output fragment
+      stream: "stdout" | "stderr" // Which stream this came from
+    }
+    ```
+  </Tab>
+
+  <Tab title="repl_output">
+    Complete result of a REPL execution.
+
+    ```typescript
+    {
+      type: "repl_output",
+      runId: string,
+      id: string,
+      parentId?: string,
+      stdout: string,         // Full accumulated output
+      error?: string,         // Error message if execution failed
+      done: boolean,          // Whether FINAL() was called
+      iteration?: number,     // Zero-based loop index
+      durationMs?: number,    // Wall-clock execution time
+      truncated?: boolean     // True if stdout was truncated
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Event sequences
+
+Understanding typical event sequences helps you handle them correctly:
+
+### Simple LLM call (provider only)
+
+```
+1. text (streamed chunks)
+2. text
+3. text
+...
+N. usage
+```
+
+### LLM call with tool request (provider only)
+
+```
+1. text (streamed response)
+2. text
+...
+N-1. tool_call (after stream ends)
+N. usage
+```
+
+### Agent with single tool call
+
+```
+1. harness_start
+2. text (from provider)
+3. tool_call (from provider)
+4. usage (from provider)
+5. relay (permission request, agent pauses)
+   ... (waiting for respond()) ...
+6. tool_call (re-emitted after approval)
+7. tool_result (after execution)
+8. text (next LLM call)
+9. usage
+10. harness_end
+```
+
+### Agent with concurrent tool calls
+
+```
+1. harness_start
+2. text
+3. tool_call (id: tc-1)
+4. tool_call (id: tc-2)
+5. usage
+6. relay (for tc-1)
+7. relay (for tc-2)
+   ... (permission phase, sequential) ...
+8. tool_call (tc-1 re-emitted)
+9. tool_call (tc-2 re-emitted)
+   ... (execution phase, concurrent) ...
+10. tool_result (tc-1)  // May arrive in any order
+11. tool_result (tc-2)
+12. text (next iteration)
+13. usage
+14. harness_end
+```
+
+## Event accumulation patterns
+
+<AccordionGroup>
+  <Accordion title="Streaming text">
+    Text and reasoning events arrive incrementally. Accumulate by `id`:
+
+    ```typescript
+    const textById = new Map<string, string>();
+
+    for await (const event of harness.invoke(params)) {
+      if (event.type === "text") {
+        const current = textById.get(event.id) ?? "";
+        textById.set(event.id, current + event.content);
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Tool call lifecycle">
+    Match tool calls with their results using the `id` field:
+
+    ```typescript
+    const toolCalls = new Map();
+    const toolResults = new Map();
+
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "tool_call") {
+        toolCalls.set(event.id, event);
+      }
+      if (event.type === "tool_result") {
+        toolResults.set(event.id, event);
+        const call = toolCalls.get(event.id);
+        console.log(`${call.name}(${JSON.stringify(call.input)}) => ${JSON.stringify(event.output)}`);
+      }
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Usage tracking">
+    Sum usage events across iterations:
+
+    ```typescript
+    let totalTokens = { input: 0, output: 0, cached: 0 };
+
+    for await (const event of agent.invoke(params)) {
+      if (event.type === "usage") {
+        totalTokens.input += event.inputTokens;
+        totalTokens.output += event.outputTokens;
+        totalTokens.cached += event.cacheReadTokens ?? 0;
+      }
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Building the conversation graph
+
+Events are reduced into an immutable conversation graph using `runId` and `parentId` for edges. The graph reducer in `packages/ai/client/graph.ts` accumulates events:
+
+```typescript
+import { createGraph, reduceEvent } from "./packages/ai/client/graph";
+
+let graph = createGraph();
+
+for await (const event of orchestrator.events()) {
+  graph = reduceEvent(graph, event);
+  // Now graph.nodes contains all events as nodes
+  // and graph.edges links them by runId → parentId
+}
+```
+
+<Info>
+See [Conversation Graph](/concepts/conversation-graph) for details on graph structure and querying, and [Client Library](/api/client/graph) for the full graph API.
+</Info>
+
+## Type safety
+
+Events are a discriminated union, so TypeScript narrows the type when you check the `type` field:
+
+```typescript
+for await (const event of agent.invoke(params)) {
+  if (event.type === "text") {
+    // TypeScript knows event.content is a string
+    process.stdout.write(event.content);
+  }
+  if (event.type === "tool_call") {
+    // TypeScript knows event.name and event.input exist
+    console.log(`Calling ${event.name}`);
+  }
+}
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Conversation Graph" icon="diagram-project" href="/concepts/conversation-graph">
+    Learn how events form an immutable graph structure
+  </Card>
+  <Card title="Client Rendering" icon="window" href="/guides/client-rendering">
+    Use graph projections to render conversations
+  </Card>
+  <Card title="Types Reference" icon="book" href="/api/types">
+    Full TypeScript type definitions for all events
+  </Card>
+  <Card title="Harnesses" icon="layer-group" href="/concepts/harnesses">
+    Return to harness fundamentals
+  </Card>
+</CardGroup>

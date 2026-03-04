@@ -1,0 +1,251 @@
+---
+title: Zen Harness
+description: OpenAI-compatible provider harness with reasoning support
+---
+
+## Overview
+
+The Zen harness is the default provider for LLM Gateway. It uses the OpenAI Chat Completions API format and supports reasoning content streaming. This is the canonical reference implementation for provider harnesses.
+
+## Import
+
+```typescript
+import { createGeneratorHarness, zenHarness } from "@llm-gateway/ai/harness/providers/zen";
+```
+
+## Function Signature
+
+```typescript
+function createGeneratorHarness(
+  apiKeyOrOptions?: string | ZenHarnessOptions
+): GeneratorHarnessModule
+```
+
+### Parameters
+
+<ParamField path="apiKeyOrOptions" type="string | ZenHarnessOptions">
+  API key string or configuration object
+  
+  <ParamField path="apiKey" type="string">
+    Zen API key. Falls back to `ZEN_API_KEY` environment variable
+  </ParamField>
+  
+  <ParamField path="model" type="string">
+    Default model to use if not specified at invoke time
+  </ParamField>
+</ParamField>
+
+### Returns
+
+<ResponseField name="GeneratorHarnessModule" type="object">
+  A harness module with `invoke()` and `supportedModels()` methods
+</ResponseField>
+
+## What It Does
+
+The Zen harness makes single LLM API calls and yields events for:
+
+- **reasoning**: Streamed reasoning content from the model
+- **text**: Streamed text content
+- **tool_call**: Tool calls from the model
+- **usage**: Token usage statistics
+- **error**: Any errors that occur
+
+It does NOT:
+- Execute tools (that's the agent wrapper's job)
+- Handle permissions (that's the agent wrapper's job)
+- Loop after tool calls (that's the agent wrapper's job)
+
+## Basic Example
+
+```typescript
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/zen";
+
+// Create with API key
+const harness = createGeneratorHarness({
+  apiKey: process.env.ZEN_API_KEY,
+  model: "claude-sonnet-4-20250514",
+});
+
+// Make a single LLM call
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Using the Singleton
+
+```typescript
+import { zenHarness } from "@llm-gateway/ai/harness/providers/zen";
+
+// Use pre-configured singleton (reads ZEN_API_KEY from env)
+for await (const event of zenHarness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## With Tools
+
+```typescript
+import { z } from "zod";
+
+const tools = [
+  {
+    name: "get_weather",
+    description: "Get the current weather for a location",
+    schema: z.object({
+      location: z.string(),
+    }),
+  },
+];
+
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "What's the weather in Paris?" }],
+  tools,
+})) {
+  if (event.type === "tool_call") {
+    console.log(`Tool: ${event.name}`);
+    console.log(`Input:`, event.input);
+  }
+}
+```
+
+## Reasoning Support
+
+The Zen harness supports `reasoning_content` streaming:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "o1",
+  messages: [{ role: "user", content: "Solve this complex problem..." }],
+})) {
+  if (event.type === "reasoning") {
+    console.log("[Reasoning]", event.content);
+  }
+  if (event.type === "text") {
+    console.log("[Answer]", event.content);
+  }
+}
+```
+
+## Multimodal Support
+
+Supports images in messages:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "What's in this image?" },
+        {
+          type: "image",
+          mediaType: "image/png",
+          data: base64ImageData,
+        },
+      ],
+    },
+  ],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Token Usage
+
+Access token usage and cache statistics:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "usage") {
+    console.log(`Input tokens: ${event.inputTokens}`);
+    console.log(`Output tokens: ${event.outputTokens}`);
+    console.log(`Cache read: ${event.cacheReadTokens ?? 0}`);
+    console.log(`Cache write: ${event.cacheCreationTokens ?? 0}`);
+  }
+}
+```
+
+## List Available Models
+
+```typescript
+const models = await harness.supportedModels();
+console.log("Available models:", models);
+```
+
+## Wrapping with Agent Harness
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/zen";
+
+// Wrap Zen provider with agent capabilities
+const agent = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 10,
+});
+
+// Now supports tool execution and looping
+for await (const event of agent.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "List files and read README" }],
+  tools: [bashTool, readTool],
+})) {
+  console.log(event);
+}
+```
+
+## API Endpoint
+
+The Zen harness calls:
+
+```
+POST https://opencode.ai/zen/v1/chat/completions
+Authorization: Bearer <API_KEY>
+```
+
+## Error Handling
+
+```typescript
+for await (const event of harness.invoke({
+  model: "claude-sonnet-4-20250514",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "error") {
+    console.error("Error:", event.error.message);
+  }
+}
+```
+
+## Architecture Notes
+
+- Uses Server-Sent Events (SSE) for streaming
+- Accumulates tool calls by index as they stream in
+- Handles malformed tool arguments gracefully
+- Supports prompt caching for efficiency
+- Single iteration only - compose with agent harness for loops
+
+## Related
+
+- [Agent Harness](/api/harnesses/agent) - Wrap provider with agentic capabilities
+- [Anthropic Harness](/api/harnesses/anthropic) - Alternative provider
+- [OpenAI Harness](/api/harnesses/openai) - OpenAI native API
+- [OpenRouter Harness](/api/harnesses/openrouter) - Multi-provider aggregator

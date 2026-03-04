@@ -1,0 +1,291 @@
+---
+title: OpenRouter Harness
+description: Multi-provider aggregator harness with unified API access
+---
+
+## Overview
+
+The OpenRouter harness provides access to multiple LLM providers through a single API. It routes requests to different providers (OpenAI, Anthropic, Google, etc.) based on the model specified.
+
+## Import
+
+```typescript
+import { createGeneratorHarness, openRouterHarness } from "@llm-gateway/ai/harness/providers/openrouter";
+```
+
+## Function Signature
+
+```typescript
+function createGeneratorHarness(
+  apiKeyOrOptions?: string | OpenRouterHarnessOptions
+): GeneratorHarnessModule
+```
+
+### Parameters
+
+<ParamField path="apiKeyOrOptions" type="string | OpenRouterHarnessOptions">
+  API key string or configuration object
+  
+  <ParamField path="apiKey" type="string">
+    OpenRouter API key. Falls back to `OPENROUTER_API_KEY` environment variable
+  </ParamField>
+  
+  <ParamField path="model" type="string">
+    Default model to use if not specified at invoke time
+  </ParamField>
+</ParamField>
+
+### Returns
+
+<ResponseField name="GeneratorHarnessModule" type="object">
+  A harness module with `invoke()` and `supportedModels()` methods
+</ResponseField>
+
+## What It Does
+
+The OpenRouter harness makes single LLM API calls and yields events for:
+
+- **text**: Streamed output text content
+- **reasoning**: Streamed reasoning content (for supported models)
+- **tool_call**: Function calls from the model
+- **error**: Any errors that occur
+
+It does NOT:
+- Execute tools (that's the agent wrapper's job)
+- Handle permissions (that's the agent wrapper's job)
+- Loop after tool calls (that's the agent wrapper's job)
+
+## Basic Example
+
+```typescript
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/openrouter";
+
+// Create with API key
+const harness = createGeneratorHarness({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  model: "anthropic/claude-sonnet-4",
+});
+
+// Make a single LLM call
+for await (const event of harness.invoke({
+  model: "anthropic/claude-sonnet-4",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Using the Singleton
+
+```typescript
+import { openRouterHarness } from "@llm-gateway/ai/harness/providers/openrouter";
+
+// Use pre-configured singleton (reads OPENROUTER_API_KEY from env)
+for await (const event of openRouterHarness.invoke({
+  model: "openai/gpt-4",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Multi-Provider Access
+
+Access different providers through model names:
+
+```typescript
+// Use Claude via Anthropic
+for await (const event of harness.invoke({
+  model: "anthropic/claude-sonnet-4",
+  messages: [{ role: "user", content: "Task 1" }],
+})) {
+  console.log(event);
+}
+
+// Use GPT-4 via OpenAI
+for await (const event of harness.invoke({
+  model: "openai/gpt-4o",
+  messages: [{ role: "user", content: "Task 2" }],
+})) {
+  console.log(event);
+}
+
+// Use Gemini via Google
+for await (const event of harness.invoke({
+  model: "google/gemini-2.0-flash-exp",
+  messages: [{ role: "user", content: "Task 3" }],
+})) {
+  console.log(event);
+}
+```
+
+## With Tools
+
+```typescript
+import { z } from "zod";
+
+const tools = [
+  {
+    name: "get_weather",
+    description: "Get weather for a location",
+    schema: z.object({
+      location: z.string(),
+      units: z.enum(["celsius", "fahrenheit"]).optional(),
+    }),
+  },
+];
+
+for await (const event of harness.invoke({
+  model: "anthropic/claude-sonnet-4",
+  messages: [{ role: "user", content: "What's the weather in Tokyo?" }],
+  tools,
+})) {
+  if (event.type === "tool_call") {
+    console.log(`Tool: ${event.name}`);
+    console.log(`Input:`, event.input);
+  }
+}
+```
+
+## Reasoning Models
+
+Reasoning is supported for compatible models:
+
+```typescript
+for await (const event of harness.invoke({
+  model: "openai/o1",
+  messages: [{ role: "user", content: "Solve this complex problem..." }],
+})) {
+  if (event.type === "reasoning") {
+    console.log("[Reasoning]", event.content);
+  }
+  if (event.type === "text") {
+    console.log("[Answer]", event.content);
+  }
+}
+```
+
+## List Available Models
+
+Get all models across providers:
+
+```typescript
+const models = await harness.supportedModels();
+console.log("Available models:", models);
+// Returns: ["openai/gpt-4o", "anthropic/claude-sonnet-4", "google/gemini-2.0-flash-exp", ...]
+```
+
+## Multimodal Support
+
+```typescript
+for await (const event of harness.invoke({
+  model: "anthropic/claude-sonnet-4",
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "What's in this image?" },
+        {
+          type: "image",
+          mediaType: "image/png",
+          data: base64ImageData,
+        },
+      ],
+    },
+  ],
+})) {
+  if (event.type === "text") {
+    console.log(event.content);
+  }
+}
+```
+
+## Wrapping with Agent Harness
+
+```typescript
+import { createAgentHarness } from "@llm-gateway/ai/harness/agent";
+import { createGeneratorHarness } from "@llm-gateway/ai/harness/providers/openrouter";
+
+// Wrap OpenRouter provider with agent capabilities
+const agent = createAgentHarness({
+  harness: createGeneratorHarness(),
+  maxIterations: 10,
+});
+
+// Now supports tool execution and looping
+for await (const event of agent.invoke({
+  model: "anthropic/claude-sonnet-4",
+  messages: [{ role: "user", content: "Research and summarize" }],
+  tools: [searchTool, readTool],
+})) {
+  console.log(event);
+}
+```
+
+## Tool Result Format
+
+OpenRouter uses camelCase for `callId` in function call outputs:
+
+```typescript
+// Tool results are converted to:
+{
+  type: "function_call_output",
+  callId: "call_123",  // Note: camelCase
+  output: "Result..."
+}
+```
+
+## Error Handling
+
+```typescript
+for await (const event of harness.invoke({
+  model: "anthropic/claude-sonnet-4",
+  messages: [{ role: "user", content: "Hello!" }],
+})) {
+  if (event.type === "error") {
+    console.error("Error:", event.error.message);
+  }
+}
+```
+
+## SDK Integration
+
+Uses OpenRouter's official SDK:
+
+```typescript
+import { OpenRouter } from "@openrouter/sdk";
+
+// The harness wraps the SDK's streaming API
+// and converts events to the standard HarnessEvent format
+```
+
+## Provider Routing
+
+OpenRouter automatically routes requests based on model prefix:
+
+- `openai/*` → OpenAI
+- `anthropic/*` → Anthropic
+- `google/*` → Google
+- `meta-llama/*` → Meta
+- And many more...
+
+See [OpenRouter models](https://openrouter.ai/models) for full list.
+
+## Architecture Notes
+
+- Uses OpenRouter SDK for streaming
+- Tracks tool calls from function_call_arguments.done events
+- Handles reasoning and text deltas separately
+- Assistant tool_calls are tracked internally by SDK
+- Single iteration only - compose with agent harness for loops
+
+## Related
+
+- [Agent Harness](/api/harnesses/agent) - Wrap provider with agentic capabilities
+- [Zen Harness](/api/harnesses/zen) - OpenAI-compatible provider
+- [Anthropic Harness](/api/harnesses/anthropic) - Anthropic direct API
+- [OpenAI Harness](/api/harnesses/openai) - OpenAI direct API

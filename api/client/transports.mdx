@@ -1,0 +1,359 @@
+---
+title: Transports
+description: Network transports for streaming events and sending commands
+---
+
+Transports handle communication between clients and the LLM Gateway server. The SSE transport streams events from the server, while the HTTP transport sends commands back.
+
+## SSE Transport
+
+The Server-Sent Events (SSE) transport provides streaming of conversation events over HTTP.
+
+### createSSETransport
+
+Creates a new SSE transport instance.
+
+```typescript
+function createSSETransport(config: { baseUrl: string }): SSETransport
+```
+
+<ParamField path="config.baseUrl" type="string" required>
+  Base URL of the LLM Gateway server (e.g., `"http://localhost:3000"`).
+</ParamField>
+
+**Returns:** An SSE transport object with a `stream` method.
+
+### stream
+
+Initiates a chat stream and returns an async generator of server events.
+
+```typescript
+stream(request: StreamRequest, signal?: AbortSignal): AsyncGenerator<ServerEvent>
+```
+
+<ParamField path="request" type="StreamRequest" required>
+  The chat request configuration.
+</ParamField>
+
+<ParamField path="signal" type="AbortSignal">
+  Optional abort signal for cancelling the stream.
+</ParamField>
+
+**Returns:** Async generator yielding `ServerEvent` objects.
+
+### StreamRequest
+
+<ParamField path="model" type="string" required>
+  Model identifier (e.g., `"claude-4.5-sonnet"`).
+</ParamField>
+
+<ParamField path="messages" type="Message[]" required>
+  Array of conversation messages to send.
+</ParamField>
+
+<ParamField path="permissions" type="Permissions">
+  Tool permission configuration.
+</ParamField>
+
+<ParamField path="mode" type="'agent' | 'rlm'">
+  Execution mode: `"agent"` for standard agent, `"rlm"` for reasoning language model.
+</ParamField>
+
+<ParamField path="maxIterations" type="number">
+  Maximum number of agent iterations (default: 10).
+</ParamField>
+
+<ParamField path="maxDepth" type="number">
+  Maximum depth for subagent spawning (default: 2).
+</ParamField>
+
+### Example: SSE Stream
+
+```typescript
+import { createSSETransport } from "@llm-gateway/client";
+
+const transport = createSSETransport({ baseUrl: "http://localhost:3000" });
+
+const controller = new AbortController();
+
+try {
+  const stream = transport.stream(
+    {
+      model: "claude-4.5-sonnet",
+      messages: [
+        { role: "user", content: "What is the weather in SF?" }
+      ],
+      permissions: {
+        allowlist: [{ tool: "get_weather" }]
+      },
+      mode: "agent",
+      maxIterations: 10
+    },
+    controller.signal
+  );
+
+  for await (const event of stream) {
+    console.log("Event:", event.type);
+    
+    if (event.type === "text") {
+      console.log("Text:", event.content);
+    }
+    
+    if (event.type === "tool_call") {
+      console.log("Tool call:", event.name, event.input);
+    }
+    
+    if (event.type === "relay") {
+      console.log("Permission requested:", event.tool);
+      // Handle via HTTP transport
+    }
+  }
+} catch (error) {
+  if (error.name !== "AbortError") {
+    console.error("Stream error:", error);
+  }
+}
+
+// Cancel stream
+controller.abort();
+```
+
+### Request Animation Frame Batching
+
+For optimal React rendering, batch events using `requestAnimationFrame`:
+
+```typescript
+const pendingEvents: ServerEvent[] = [];
+let rafId: number | undefined;
+
+const flushPending = () => {
+  if (rafId !== undefined) cancelAnimationFrame(rafId);
+  rafId = undefined;
+  
+  if (pendingEvents.length > 0) {
+    const batch = pendingEvents.splice(0);
+    setState((s) => {
+      let current = s;
+      for (const e of batch) {
+        current = reduceConversation(current, e);
+      }
+      return current;
+    });
+  }
+};
+
+for await (const event of stream) {
+  pendingEvents.push(event);
+  
+  if (rafId === undefined) {
+    rafId = requestAnimationFrame(() => {
+      rafId = undefined;
+      const batch = pendingEvents.splice(0);
+      setState((s) => {
+        let current = s;
+        for (const e of batch) {
+          current = reduceConversation(current, e);
+        }
+        return current;
+      });
+    });
+  }
+}
+
+flushPending();
+```
+
+## HTTP Transport
+
+The HTTP transport sends client commands to the server, primarily for resolving relay requests.
+
+### createHTTPTransport
+
+Creates a new HTTP transport instance.
+
+```typescript
+function createHTTPTransport(config: { baseUrl: string }): HTTPTransport
+```
+
+<ParamField path="config.baseUrl" type="string" required>
+  Base URL of the LLM Gateway server.
+</ParamField>
+
+**Returns:** An HTTP transport object with a `resolveRelay` method.
+
+### resolveRelay
+
+Sends a permission decision for a pending relay request.
+
+```typescript
+resolveRelay(
+  sessionId: string,
+  relayId: string,
+  response: ResolveResponse
+): Promise<void>
+```
+
+<ParamField path="sessionId" type="string" required>
+  The session that owns the relay.
+</ParamField>
+
+<ParamField path="relayId" type="string" required>
+  The relay event ID to resolve.
+</ParamField>
+
+<ParamField path="response" type="ResolveResponse" required>
+  The permission decision.
+</ParamField>
+
+### ResolveResponse
+
+<ParamField path="approved" type="boolean" required>
+  Whether the permission is granted.
+</ParamField>
+
+<ParamField path="reason" type="string">
+  Optional reason for denial.
+</ParamField>
+
+<ParamField path="always" type="boolean">
+  If true, adds this tool to the allowlist for the session.
+</ParamField>
+
+### Example: HTTP Commands
+
+```typescript
+import { createHTTPTransport } from "@llm-gateway/client";
+
+const httpTransport = createHTTPTransport({ baseUrl: "http://localhost:3000" });
+
+// Allow a single relay
+await httpTransport.resolveRelay(
+  "session-123",
+  "relay-456",
+  { approved: true }
+);
+
+// Deny with reason
+await httpTransport.resolveRelay(
+  "session-123",
+  "relay-789",
+  { approved: false, reason: "User denied" }
+);
+
+// Allow and add to allowlist
+await httpTransport.resolveRelay(
+  "session-123",
+  "relay-101",
+  { approved: true, always: true }
+);
+```
+
+## Combined Usage
+
+Typical pattern combining both transports:
+
+```typescript
+import {
+  createSSETransport,
+  createHTTPTransport,
+  createInitialConversation,
+  reduceConversation,
+} from "@llm-gateway/client";
+
+const sseTransport = createSSETransport({ baseUrl: "http://localhost:3000" });
+const httpTransport = createHTTPTransport({ baseUrl: "http://localhost:3000" });
+
+function ChatApp() {
+  const [state, setState] = useState(createInitialConversation());
+
+  const handleAllow = async (relay: PendingRelay) => {
+    if (!state.sessionId) return;
+
+    // Remove from pending list
+    setState((s) => reduceConversation(s, {
+      type: "relay_resolved",
+      relayId: relay.relayId,
+      tool: relay.tool,
+      approved: true
+    }));
+
+    // Send decision to server
+    await httpTransport.resolveRelay(
+      state.sessionId,
+      relay.relayId,
+      { approved: true }
+    );
+  };
+
+  const handleDeny = async (relay: PendingRelay) => {
+    if (!state.sessionId) return;
+
+    setState((s) => reduceConversation(s, {
+      type: "relay_resolved",
+      relayId: relay.relayId,
+      tool: relay.tool,
+      approved: false
+    }));
+
+    await httpTransport.resolveRelay(
+      state.sessionId,
+      relay.relayId,
+      { approved: false, reason: "User denied" }
+    );
+  };
+
+  const sendMessage = async (content: string) => {
+    setState((s) => reduceConversation(s, { type: "stream_start" }));
+
+    try {
+      const stream = sseTransport.stream({
+        model: "claude-4.5-sonnet",
+        messages: [{ role: "user", content }]
+      });
+
+      for await (const event of stream) {
+        setState((s) => reduceConversation(s, event));
+      }
+    } finally {
+      setState((s) => reduceConversation(s, { type: "stream_end" }));
+    }
+  };
+
+  return (
+    <div>
+      {state.pendingRelays.map((relay) => (
+        <div key={relay.relayId}>
+          <p>Permission required: {relay.tool}</p>
+          <button onClick={() => handleAllow(relay)}>Allow</button>
+          <button onClick={() => handleDeny(relay)}>Deny</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+```
+
+## Error Handling
+
+Both transports throw errors for HTTP failures:
+
+```typescript
+try {
+  const stream = transport.stream(request);
+  for await (const event of stream) {
+    // Process events
+  }
+} catch (error) {
+  if (error.name === "AbortError") {
+    console.log("Stream cancelled");
+  } else {
+    console.error("Stream error:", error.message);
+  }
+}
+
+try {
+  await httpTransport.resolveRelay(sessionId, relayId, response);
+} catch (error) {
+  console.error("Failed to resolve relay:", error.message);
+}
+```

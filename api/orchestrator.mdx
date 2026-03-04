@@ -1,0 +1,271 @@
+---
+title: "AgentOrchestrator"
+description: "Orchestrates multiple AI agents, managing lifecycle and relay flow"
+---
+
+## Overview
+
+The `AgentOrchestrator` class manages multiple AI agents running concurrently. It handles agent spawning, event multiplexing, and relay request management for permission-based tool execution.
+
+### Key Features
+
+- Spawn multiple agents that run concurrently
+- Multiplex events from all agents into a single stream
+- Manage relay requests for permission-based tool execution
+- Support for agent hierarchies with subagent spawning
+- Automatic pause/resume when awaiting relay responses
+
+## Constructor
+
+```typescript
+const orchestrator = new AgentOrchestrator(harness?);
+```
+
+<ParamField path="harness" type="GeneratorHarnessModule" optional>
+  Optional harness module. Defaults to the agent harness wrapping OpenRouter.
+</ParamField>
+
+## Methods
+
+### spawn()
+
+Spawn a new agent and begin event production.
+
+```typescript
+const agentId = orchestrator.spawn({
+  model: "openai/gpt-4",
+  messages: [{ role: "user", content: "Hello" }],
+  tools: [myTool],
+  permissions: { allowlist: [] },
+});
+```
+
+<ParamField path="params" type="GeneratorInvokeParams" required>
+  Parameters for agent invocation
+</ParamField>
+
+<ParamField path="params.model" type="string" optional>
+  The LLM model to use (e.g., `"openai/gpt-4"`, `"anthropic/claude-3-5-sonnet"`)
+</ParamField>
+
+<ParamField path="params.messages" type="Message[]" required>
+  Array of conversation messages
+</ParamField>
+
+<ParamField path="params.tools" type="ToolDefinition[]" optional>
+  Available tools for the agent to use
+</ParamField>
+
+<ParamField path="params.permissions" type="Permissions" optional>
+  Tool execution permissions with allowlist/allowOnce/deny rules
+</ParamField>
+
+<ParamField path="params.context" type="string" optional>
+  Additional context to inject into the conversation
+</ParamField>
+
+<ParamField path="params.env" type="object" optional>
+  Environment context including parentId, spawn function, and fileTime
+</ParamField>
+
+<ResponseField name="agentId" type="string">
+  Unique identifier for the spawned agent (UUID v7)
+</ResponseField>
+
+### events()
+
+Stream all events from all registered agents.
+
+```typescript
+for await (const { agentId, event } of orchestrator.events()) {
+  if (event.type === "relay") {
+    // Handle permission request
+    orchestrator.resolveRelay(event.id, { approved: true });
+  } else if (event.type === "text") {
+    console.log(`${agentId}: ${event.content}`);
+  }
+}
+```
+
+<ResponseField name="agentId" type="string">
+  The agent that produced this event
+</ResponseField>
+
+<ResponseField name="event" type="ConsumerHarnessEvent">
+  The event data. Relay events have the `respond` callback stripped - use `resolveRelay()` instead.
+</ResponseField>
+
+### resolveRelay()
+
+Resolve a pending relay request and resume the agent.
+
+```typescript
+// Approve once
+orchestrator.resolveRelay(relayId, { approved: true });
+
+// Approve and always allow this tool
+orchestrator.resolveRelay(relayId, { approved: true, always: true });
+
+// Deny with reason
+orchestrator.resolveRelay(relayId, { approved: false, reason: "Not allowed" });
+```
+
+<ParamField path="relayId" type="string" required>
+  The ID of the relay event awaiting resolution
+</ParamField>
+
+<ParamField path="response" type="ResolveResponse" required>
+  The resolution response
+</ParamField>
+
+<ParamField path="response.approved" type="boolean" required>
+  Whether to approve or deny the tool execution
+</ParamField>
+
+<ParamField path="response.always" type="boolean" optional>
+  If true, derive a permission and add to allowlist for future auto-approval
+</ParamField>
+
+<ParamField path="response.reason" type="string" optional>
+  Reason for denial (only used when approved is false)
+</ParamField>
+
+<ResponseField name="success" type="boolean">
+  Returns true if the relay was found and resolved, false otherwise
+</ResponseField>
+
+### kill()
+
+Terminate an agent and clean up its resources.
+
+```typescript
+orchestrator.kill(agentId);
+```
+
+<ParamField path="agentId" type="string" required>
+  The ID of the agent to terminate
+</ParamField>
+
+## Types
+
+### PendingRelay
+
+Internal state for a relay awaiting resolution.
+
+```typescript
+interface PendingRelay {
+  agentId: string;
+  tool: string;
+  params: Record<string, unknown>;
+  permissions?: Permissions;
+  tools?: ToolDefinition[];
+  respond: (response: any) => void;
+}
+```
+
+### ResolveResponse
+
+Response type for relay resolution.
+
+```typescript
+type ResolveResponse =
+  | { approved: true; always?: boolean }
+  | { approved: false; reason?: string };
+```
+
+### ConsumerHarnessEvent
+
+HarnessEvent with relay respond callbacks stripped.
+
+```typescript
+type ConsumerHarnessEvent =
+  | Exclude<HarnessEvent, { type: "relay" }>
+  | {
+      type: "relay";
+      kind: "permission";
+      runId: string;
+      id: string;
+      parentId?: string;
+      toolCallId: string;
+      tool: string;
+      params: Record<string, unknown>;
+    };
+```
+
+## Complete Example
+
+```typescript
+import { AgentOrchestrator } from "@llm-gateway/ai";
+import { myTool } from "./tools";
+
+const orchestrator = new AgentOrchestrator();
+
+// Spawn multiple agents
+const agent1 = orchestrator.spawn({
+  model: "openai/gpt-4",
+  messages: [{ role: "user", content: "Analyze this data" }],
+  tools: [myTool],
+  permissions: { allowlist: [{ tool: "read", params: { path: "data/*" } }] },
+});
+
+const agent2 = orchestrator.spawn({
+  model: "anthropic/claude-3-5-sonnet",
+  messages: [{ role: "user", content: "Write a summary" }],
+});
+
+// Process events from all agents
+for await (const { agentId, event } of orchestrator.events()) {
+  switch (event.type) {
+    case "relay":
+      // Permission requested - approve or deny
+      const shouldApprove = await checkPermission(event.tool, event.params);
+      orchestrator.resolveRelay(event.id, {
+        approved: shouldApprove,
+        always: true, // Auto-approve future matching calls
+      });
+      break;
+
+    case "text":
+      console.log(`[${agentId}] ${event.content}`);
+      break;
+
+    case "tool_call":
+      console.log(`[${agentId}] Calling ${event.name}`);
+      break;
+
+    case "error":
+      console.error(`[${agentId}] Error:`, event.error);
+      orchestrator.kill(agentId);
+      break;
+  }
+}
+```
+
+## Relay Flow
+
+When an agent needs permission to execute a tool:
+
+1. Agent is automatically paused
+2. Relay event is yielded with tool details
+3. The `respond` callback is stashed internally
+4. Consumer calls `resolveRelay()` to approve/deny
+5. Agent is resumed and continues execution
+
+### Always-Allow Pattern
+
+When resolving with `always: true`, the orchestrator:
+
+1. Calls the tool's `derivePermission()` function if available
+2. Adds the derived permission to the agent's allowlist
+3. Future matching tool calls are auto-approved without relay events
+
+```typescript
+const readTool: ToolDefinition = {
+  name: "read",
+  derivePermission: (params) => ({
+    tool: "read",
+    params: { path: params.path }, // Specific file path
+  }),
+  // ...
+};
+```

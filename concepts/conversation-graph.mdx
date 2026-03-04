@@ -1,0 +1,421 @@
+---
+title: Conversation Graph
+description: How events form an immutable directed graph with nodes linked by runId and parentId
+icon: diagram-project
+---
+
+## Overview
+
+Events don't just stream in isolation — they form a **conversation graph**. Each event becomes a node, and edges link nodes based on `runId` and `parentId`. This graph captures the full structure of multi-agent conversations, including parallel tool execution and nested subagent branches.
+
+The graph is:
+- **Immutable**: Events are append-only. Reducing a new event produces a new graph.
+- **Directed**: Edges go from parent to child, forming a DAG (directed acyclic graph).
+- **Typed**: Each node has a `kind` field that determines its shape.
+
+## Graph structure
+
+The graph is defined in `packages/ai/client/types.ts:27`:
+
+```typescript
+interface Graph {
+  nodes: Map<string, Node>;           // All nodes, keyed by id
+  edges: Map<string, string[]>;       // Adjacency list: nodeId → childIds[]
+  lastNodeByRunId: Map<string, string>; // Tracks most recent node per runId
+}
+```
+
+### Nodes
+
+Each event becomes a node with a deterministic ID:
+
+```typescript
+type Node = { id: string; runId: string } & (
+  | { kind: "text"; content: string }
+  | { kind: "reasoning"; content: string }
+  | { kind: "tool_call"; name: string; input: unknown }
+  | { kind: "tool_result"; name: string; output: unknown }
+  | { kind: "tool_progress"; toolCallId: string; name: string; content: unknown }
+  | { kind: "user"; content: string | ContentPart[] }
+  | { kind: "harness_start"; agentId: string }
+  | { kind: "harness_end"; agentId: string }
+  | { kind: "error"; message: string }
+  | { kind: "usage"; inputTokens: number; outputTokens: number }
+  | { kind: "relay"; relayKind: "permission"; toolCallId: string; tool: string; params: Record<string, unknown> }
+);
+```
+
+### Node IDs
+
+Node IDs are derived deterministically from events (`packages/ai/client/graph.ts:38`):
+
+| Event type | Node ID |
+|------------|----------|
+| `text`, `reasoning`, `tool_call`, `relay` | `event.id` |
+| `tool_result` | `event.id + ":result"` (suffix to distinguish from tool_call) |
+| `harness_start` | `event.runId + ":harness_start"` |
+| `harness_end` | `event.runId + ":harness_end"` |
+| `error` | `event.runId + ":error"` |
+| `usage` | `event.runId + ":usage:" + counter` |
+| `user` | `event.runId + ":user"` |
+
+### Edges
+
+Edges link nodes in two ways:
+
+1. **Sequential edges**: Within a `runId`, each node links to the next node from the same run.
+2. **Cross-run edges**: The first node in a run with a `parentId` links from that `parentId` node.
+
+```typescript Edge construction (from graph.ts:186)
+// Cross-run edge: first event in this run with parentId
+if (!prevInRun && parentId) {
+  edges = addEdge(edges, parentId, nodeId);
+}
+
+// Sequential edge: from previous node in this run to this node
+if (prevInRun) {
+  edges = addEdge(edges, prevInRun, nodeId);
+}
+```
+
+## Building the graph
+
+Reduce events into a graph using `reduceEvent`:
+
+```typescript
+import { createGraph, reduceEvent } from "./packages/ai/client/graph";
+
+let graph = createGraph();
+
+for await (const event of orchestrator.events()) {
+  graph = reduceEvent(graph, event);
+}
+
+// Now graph.nodes contains all events as nodes
+// and graph.edges links them
+console.log(`Graph has ${graph.nodes.size} nodes`);
+```
+
+### Streaming updates
+
+For `text` and `reasoning` events, the reducer appends content to existing nodes instead of creating new nodes:
+
+```typescript Streaming accumulation (from graph.ts:166)
+const existingNode = nodes.get(nodeId);
+if (existingNode) {
+  if (
+    (event.type === "text" && existingNode.kind === "text") ||
+    (event.type === "reasoning" && existingNode.kind === "reasoning")
+  ) {
+    // Append content, don't add new edges
+    nodes.set(nodeId, { 
+      ...existingNode, 
+      content: existingNode.content + event.content 
+    });
+    return { nodes, edges, lastNodeByRunId };
+  }
+}
+```
+
+This means multiple `text` events with the same `id` produce a single node with accumulated content.
+
+## Querying the graph
+
+Common queries on the graph structure:
+
+### Get children of a node
+
+```typescript
+function getChildren(graph: Graph, nodeId: string): Node[] {
+  const childIds = graph.edges.get(nodeId) ?? [];
+  return childIds.map(id => graph.nodes.get(id)!).filter(Boolean);
+}
+
+const children = getChildren(graph, "tc-1");
+console.log(`Tool call has ${children.length} children`);
+```
+
+### Get all nodes in a run
+
+```typescript
+function getNodesInRun(graph: Graph, runId: string): Node[] {
+  return Array.from(graph.nodes.values()).filter(n => n.runId === runId);
+}
+
+const agentNodes = getNodesInRun(graph, "agent-123");
+```
+
+### Get text content
+
+```typescript
+function getText(graph: Graph, runId: string): string {
+  const textNodes = Array.from(graph.nodes.values())
+    .filter(n => n.runId === runId && n.kind === "text");
+  return textNodes.map(n => n.content).join("");
+}
+
+const response = getText(graph, "agent-123");
+```
+
+### Find tool calls
+
+```typescript
+function getToolCalls(graph: Graph, runId: string): Node[] {
+  return Array.from(graph.nodes.values())
+    .filter(n => n.runId === runId && n.kind === "tool_call");
+}
+
+const tools = getToolCalls(graph, "agent-123");
+console.log(`Agent made ${tools.length} tool calls`);
+```
+
+## Example graph
+
+Here's what a graph looks like for an agent with one tool call:
+
+```
+User message
+  runId: "user-1"
+  nodes:
+    - id: "user-1:user", kind: "user", content: "List files"
+
+  ↓ (edge from user-1:user to agent-1:harness_start)
+
+Agent run
+  runId: "agent-1"
+  parentId: "user-1:user"
+  nodes:
+    - id: "agent-1:harness_start", kind: "harness_start"
+    - id: "text-1", kind: "text", content: "I'll list the files..."
+    - id: "tc-1", kind: "tool_call", name: "bash", input: { command: "ls" }
+    - id: "usage-1", kind: "usage", inputTokens: 50, outputTokens: 20
+    - id: "relay-1", kind: "relay", toolCallId: "tc-1", tool: "bash"
+    - id: "tc-1:result", kind: "tool_result", name: "bash", output: { context: "file1.txt\nfile2.txt" }
+    - id: "text-2", kind: "text", content: "The directory contains..."
+    - id: "usage-2", kind: "usage", inputTokens: 70, outputTokens: 15
+    - id: "agent-1:harness_end", kind: "harness_end"
+
+  edges:
+    agent-1:harness_start → text-1
+    text-1 → tc-1
+    tc-1 → usage-1
+    usage-1 → relay-1
+    relay-1 → tc-1:result
+    tc-1:result → text-2
+    text-2 → usage-2
+    usage-2 → agent-1:harness_end
+```
+
+## Subagent graph structure
+
+Subagents introduce cross-run edges. When an agent spawns a subagent via the `agent` tool, the subagent's first node links from the parent's tool call:
+
+```
+Parent agent (runId: "a1")
+  - text "I'll search..."
+  - tool_call id:"tc-1" name:"agent" input:{task:"search for X"}
+  
+  ↓ (cross-run edge from tc-1 to a2:harness_start)
+  
+Subagent (runId: "a2", parentId: "tc-1")
+  - harness_start
+  - text "Searching..."
+  - tool_call id:"tc-2" name:"bash" input:{command:"grep ..."}
+  - tool_result id:"tc-2" output:{...}
+  - text "Found results"
+  - harness_end
+  
+  ↓ (back to parent, tool_result for tc-1)
+  
+Parent agent continues
+  - tool_result id:"tc-1" output:{result from subagent}
+  - text "Based on the search..."
+```
+
+The graph captures this naturally:
+- `tc-1` (parent tool call) → `a2:harness_start` (subagent start) via cross-run edge
+- All of subagent `a2`'s nodes link sequentially
+- Parent resumes after subagent completes
+
+<Info>
+See [Subagents](/guides/multi-agent) for details on spawning and coordinating subagents.
+</Info>
+
+## Projections
+
+Raw graph nodes aren't ideal for rendering. Projections transform the graph into view-specific formats:
+
+### Thread projection
+
+Produces a linear thread of messages for chat UIs:
+
+```typescript
+import { projectThread } from "./packages/ai/client/hypergraph/projections";
+import { defaultActive } from "./packages/ai/client/hypergraph/active";
+
+const active = defaultActive(conversation);
+const thread = projectThread(conversation, active);
+
+// thread is ViewNode[] with text, tool_call, tool_result blocks
+thread.forEach(node => {
+  console.log(`[${node.role}]`, node.text);
+  node.toolCalls?.forEach(tc => console.log(`  Tool: ${tc.name}`));
+});
+```
+
+### Message projection
+
+Produces an array of `Message` objects for feeding back into harnesses:
+
+```typescript
+import { projectMessages } from "./packages/ai/client/hypergraph/projections";
+
+const messages = projectMessages(conversation, active);
+
+// messages is Message[] ready for harness.invoke()
+const response = await agent.invoke({ model: "glm-4.7", messages });
+```
+
+### DAG projection
+
+Produces a layout for graph visualization:
+
+```typescript
+import { projectDAG } from "./packages/ai/client/hypergraph/projections";
+
+const layout = projectDAG(conversation, active);
+
+// layout has nodes with (x, y) positions and edges for rendering
+layout.nodes.forEach(n => {
+  console.log(`${n.label} at (${n.x}, ${n.y})`);
+});
+```
+
+<Info>
+See [Client Library](/api/client/projections) for projection API details, and [Client Rendering](/guides/client-rendering) for usage in UIs.
+</Info>
+
+## Hypergraph model
+
+The new hypergraph model (active implementation in `packages/ai/client/hypergraph/`) extends the flat graph with a three-tier hierarchy:
+
+1. **Chunks**: Individual content pieces (text, tool_call, tool_result)
+2. **Blocks**: Groups of chunks from one harness invocation
+3. **Messages**: Top-level conversation turns (user messages, agent responses)
+
+Hyperedges connect these tiers:
+- `chunk_to_block`: Which block contains this chunk
+- `block_to_message`: Which message contains this block
+- `parent_message`: Reply-to relationships
+
+This model enables:
+- Efficient message threading
+- Nested subagent rendering
+- Selective projection (hide reasoning, collapse tool calls)
+- Edit/branch operations
+
+<Info>
+See `packages/ai/client/hypergraph/CLAUDE.md` in the source for hypergraph details. The flat graph API remains for compatibility.
+</Info>
+
+## Persistence
+
+The graph is typically held in memory during a session, but events can be persisted:
+
+- **Redis Streams**: In-flight events cached via `XADD` for reconnection
+- **Postgres**: Completed messages stored with `parent_message_id` for the graph structure
+- **Client**: Graph rebuilt from events on reconnection via `reduceEvent`
+
+<Info>
+See [Server Setup](/deployment/server-setup) for persistence configuration.
+</Info>
+
+## Graph traversal
+
+Common traversal patterns:
+
+<CodeGroup>
+```typescript Depth-first walk
+function walkDFS(graph: Graph, startId: string, visit: (node: Node) => void) {
+  const node = graph.nodes.get(startId);
+  if (!node) return;
+  
+  visit(node);
+  
+  const children = graph.edges.get(startId) ?? [];
+  for (const childId of children) {
+    walkDFS(graph, childId, visit);
+  }
+}
+
+walkDFS(graph, "user-1:user", (node) => {
+  console.log(node.kind, node.id);
+});
+```
+
+```typescript Breadth-first walk
+function walkBFS(graph: Graph, startId: string, visit: (node: Node) => void) {
+  const queue = [startId];
+  const visited = new Set<string>();
+  
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    
+    const node = graph.nodes.get(id);
+    if (!node) continue;
+    
+    visit(node);
+    
+    const children = graph.edges.get(id) ?? [];
+    queue.push(...children);
+  }
+}
+
+walkBFS(graph, "user-1:user", (node) => {
+  console.log(node.kind, node.id);
+});
+```
+
+```typescript Find path between nodes
+function findPath(graph: Graph, fromId: string, toId: string): string[] | null {
+  const queue: Array<{ id: string; path: string[] }> = [{ id: fromId, path: [fromId] }];
+  const visited = new Set<string>();
+  
+  while (queue.length > 0) {
+    const { id, path } = queue.shift()!;
+    if (id === toId) return path;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    
+    const children = graph.edges.get(id) ?? [];
+    for (const childId of children) {
+      queue.push({ id: childId, path: [...path, childId] });
+    }
+  }
+  
+  return null;
+}
+
+const path = findPath(graph, "user-1:user", "agent-1:harness_end");
+console.log("Path:", path?.map(id => graph.nodes.get(id)?.kind));
+```
+</CodeGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Client Library" icon="book" href="/api/client/graph">
+    Full graph API reference
+  </Card>
+  <Card title="Projections" icon="diagram-project" href="/api/client/projections">
+    Transform graphs for rendering
+  </Card>
+  <Card title="Client Rendering" icon="window" href="/guides/client-rendering">
+    Build UIs with graph projections
+  </Card>
+  <Card title="Events" icon="bolt" href="/concepts/events">
+    Return to event type reference
+  </Card>
+</CardGroup>

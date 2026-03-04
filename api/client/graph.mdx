@@ -1,0 +1,216 @@
+---
+title: Graph
+description: Core conversation graph data structure and reducer
+---
+
+The graph module implements the legacy flat graph model for conversation state. It uses an adjacency-list representation with three-tier tracking: nodes contain content, edges define relationships, and `lastNodeByRunId` tracks sequential flow within each run.
+
+<Note>
+  The hypergraph model (`hypergraph/`) is now the active implementation used by the web client. This legacy graph is still exported for backwards compatibility.
+</Note>
+
+## Types
+
+### Node
+
+Represents a single content block in the conversation graph.
+
+```typescript
+type Node = { id: string; runId: string } & (
+  | { kind: "text"; content: string }
+  | { kind: "reasoning"; content: string }
+  | { kind: "tool_call"; name: string; input: unknown }
+  | { kind: "tool_result"; name: string; output: unknown }
+  | { kind: "tool_progress"; toolCallId: string; name: string; content: unknown }
+  | { kind: "user"; content: string | ContentPart[] }
+  | { kind: "harness_start"; agentId: string }
+  | { kind: "harness_end"; agentId: string }
+  | { kind: "error"; message: string }
+  | { kind: "usage"; inputTokens: number; outputTokens: number }
+  | { kind: "relay"; relayKind: "permission"; toolCallId: string; tool: string; params: Record<string, unknown> }
+)
+```
+
+<ParamField path="id" type="string">
+  Unique identifier derived from the event.
+</ParamField>
+
+<ParamField path="runId" type="string">
+  Identifier for the execution run that produced this node.
+</ParamField>
+
+<ParamField path="kind" type="string">
+  The type of content this node represents.
+</ParamField>
+
+### Graph
+
+The complete conversation graph structure.
+
+<ParamField path="nodes" type="Map<string, Node>">
+  All nodes keyed by their unique ID.
+</ParamField>
+
+<ParamField path="edges" type="Map<string, string[]>">
+  Adjacency list mapping source node IDs to arrays of target node IDs.
+</ParamField>
+
+<ParamField path="lastNodeByRunId" type="Map<string, string>">
+  Tracks the most recent node ID for each run, used to construct sequential edges.
+</ParamField>
+
+### GraphEvent
+
+Union of events the graph reducer processes.
+
+```typescript
+type GraphEvent = ServerEvent | UserEvent
+
+interface UserEvent {
+  type: "user";
+  runId: string;
+  parentId?: string;
+  content: string | ContentPart[];
+}
+```
+
+## Functions
+
+### createGraph
+
+Creates an empty conversation graph.
+
+```typescript
+function createGraph(): Graph
+```
+
+**Returns:** A new `Graph` with empty node, edge, and tracking maps.
+
+**Example:**
+
+```typescript
+import { createGraph } from "@llm-gateway/client";
+
+const graph = createGraph();
+```
+
+### reduceEvent
+
+Pure reducer that applies a single event to produce a new graph.
+
+```typescript
+function reduceEvent(graph: Graph, event: GraphEvent): Graph
+```
+
+<ParamField path="graph" type="Graph" required>
+  The current graph state.
+</ParamField>
+
+<ParamField path="event" type="GraphEvent" required>
+  The event to apply.
+</ParamField>
+
+**Returns:** A new `Graph` with the event incorporated.
+
+**Example:**
+
+```typescript
+import { createGraph, reduceEvent } from "@llm-gateway/client";
+
+let graph = createGraph();
+
+// Add user message
+graph = reduceEvent(graph, {
+  type: "user",
+  runId: "user-1",
+  content: "What is the weather?"
+});
+
+// Process assistant text
+graph = reduceEvent(graph, {
+  type: "text",
+  id: "text-1",
+  runId: "assistant-1",
+  agentId: "main",
+  parentId: "user-1:user",
+  content: "Let me check that for you."
+});
+
+// Process tool call
+graph = reduceEvent(graph, {
+  type: "tool_call",
+  id: "call-1",
+  runId: "assistant-1",
+  agentId: "main",
+  name: "get_weather",
+  input: { location: "San Francisco" }
+});
+```
+
+## Node ID Derivation
+
+The graph reducer derives deterministic node IDs from events:
+
+- **text, reasoning, tool_call, relay**: Use the event's `id` field
+- **tool_result**: `{id}:result` (shares tool_call's base ID)
+- **tool_progress**: Uses the event's `id` field
+- **harness_start**: `{runId}:harness_start`
+- **harness_end**: `{runId}:harness_end`
+- **error**: `{runId}:error`
+- **usage**: `{runId}:usage:{counter}` (uses internal counter)
+- **user**: `{runId}:user`
+- **connected**: Returns `null` (no node created)
+
+## Edge Construction
+
+The reducer creates two types of edges:
+
+**Sequential edges:** Within a single run, each node connects to the next node in that run.
+
+**Cross-run edges:** When a new run starts with a `parentId`, the first node in the new run connects from the parent node.
+
+```typescript
+// Example: User message triggers assistant response
+user-1:user -> assistant-1:harness_start  // cross-run edge
+assistant-1:harness_start -> text-1       // sequential edge
+text-1 -> call-1                          // sequential edge
+```
+
+## Streaming Append
+
+Text and reasoning nodes support streaming: when an event arrives with an ID that already exists and matches the node kind, the content is appended instead of creating a new node.
+
+```typescript
+// First chunk
+graph = reduceEvent(graph, {
+  type: "text",
+  id: "text-1",
+  runId: "assistant-1",
+  agentId: "main",
+  content: "The weather"
+});
+
+// Second chunk appends to existing node
+graph = reduceEvent(graph, {
+  type: "text",
+  id: "text-1",
+  runId: "assistant-1",
+  agentId: "main",
+  content: " is sunny."
+});
+
+// Result: node with content "The weather is sunny."
+```
+
+## Immutability
+
+All graph operations are immutable. The reducer clones all maps and produces a new graph instance.
+
+```typescript
+const graph1 = createGraph();
+const graph2 = reduceEvent(graph1, event);
+
+// graph1 unchanged
+console.log(graph1.nodes.size); // 0
+console.log(graph2.nodes.size); // 1
+```

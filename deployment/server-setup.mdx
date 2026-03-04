@@ -1,0 +1,272 @@
+---
+title: Server Setup
+description: Learn how to set up and run the LLM Gateway server in development and production environments
+---
+
+## Overview
+
+The LLM Gateway server is built with Hono and Bun, providing HTTP/SSE endpoints for agent orchestration. The server manages per-session orchestrators with automatic cleanup and supports multiple AI providers through a unified interface.
+
+## Prerequisites
+
+Before setting up the server, ensure you have:
+
+- **Bun** v1.0 or later installed ([installation guide](https://bun.sh))
+- API keys for at least one provider:
+  - OpenRouter API key
+  - Zen API key
+  - Or other supported providers (Anthropic, OpenAI)
+
+## Installation
+
+Clone the repository and install dependencies:
+
+```bash
+git clone <repository-url>
+cd llm-gateway
+bun install
+```
+
+## Environment Setup
+
+Create a `.env` file from the example:
+
+```bash
+cp .env.example .env
+```
+
+Configure your environment variables (see [Environment Variables](/deployment/environment-variables) for details):
+
+```bash
+# Required: At least one provider API key
+OPENROUTER_API_KEY=your_key_here
+ZEN_API_KEY=your_key_here
+
+# Optional: Server configuration
+DEFAULT_MODEL=glm-4.7
+PORT=4000
+LOG_LEVEL=I
+```
+
+## Development Mode
+
+Start the server with hot reload:
+
+```bash
+bun run dev:server
+```
+
+The server will start on `http://localhost:4000` (or the port specified in your `.env` file).
+
+<Note>
+Development mode includes hot reload - the server automatically restarts when you modify source files.
+</Note>
+
+## Production Mode
+
+For production deployment, run the server directly:
+
+```bash
+bun run server/index.ts
+```
+
+### Production Considerations
+
+<Card title="Process Management" icon="server">
+Use a process manager like PM2, systemd, or Docker to ensure your server stays running:
+
+```bash
+# Using PM2
+pm2 start "bun run server/index.ts" --name llm-gateway
+
+# Using systemd (create /etc/systemd/system/llm-gateway.service)
+[Unit]
+Description=LLM Gateway Server
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/path/to/llm-gateway
+ExecStart=/usr/local/bin/bun run server/index.ts
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+</Card>
+
+<Card title="Reverse Proxy" icon="shield">
+Place the server behind a reverse proxy (nginx, Caddy) for:
+- SSL/TLS termination
+- Load balancing
+- Request rate limiting
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name api.yourdomain.com;
+
+    location / {
+        proxy_pass http://localhost:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        
+        # SSE specific settings
+        proxy_buffering off;
+        proxy_read_timeout 86400;
+    }
+}
+```
+</Card>
+
+## Server Architecture
+
+The server is built around the `createApp` factory function with the following structure:
+
+### Core Components
+
+<CodeGroup>
+```typescript server/index.ts
+import { createApp } from "./server";
+
+const app = await createApp({
+  defaultModel: process.env.DEFAULT_MODEL,
+  // Optional: custom harness, tools, skillDirs
+});
+
+export default {
+  port: Number(process.env.PORT) || 4000,
+  fetch: app.fetch,
+  idleTimeout: 255,
+};
+```
+</CodeGroup>
+
+### Available Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/models` | GET | List available models from configured providers |
+| `/chat` | POST | Stream agent responses via SSE |
+| `/chat/relay/:relayId` | POST | Resolve permission relays (human-in-the-loop) |
+| `/summarize` | POST | Summarize conversation history |
+
+<Info>
+See the [HTTP API Overview](/api/http/overview) for detailed endpoint documentation.
+</Info>
+
+## Custom Configuration
+
+You can customize the server by providing configuration options to `createApp`:
+
+```typescript
+import { createApp } from "./server";
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+import { bashTool, agentTool, readTool, patchTool } from "./packages/ai/tools";
+
+const app = await createApp({
+  // Custom harness (default: agent harness with Zen provider)
+  harness: createAgentHarness({ 
+    harness: createGeneratorHarness() 
+  }),
+  
+  // Custom tools (default: bash, agent, read, patch)
+  tools: [bashTool, agentTool, readTool, patchTool],
+  
+  // Default model for requests without model specified
+  defaultModel: "glm-4.7",
+  
+  // Directories to search for skills
+  skillDirs: ["./custom-skills"],
+});
+```
+
+## Session Management
+
+The server creates a fresh `AgentOrchestrator` for each `/chat` request:
+
+<Steps>
+  <Step title="Connection">
+    Client initiates SSE connection to `/chat` endpoint
+  </Step>
+  <Step title="Orchestrator Creation">
+    Server creates new orchestrator instance with unique session ID
+  </Step>
+  <Step title="Event Streaming">
+    Orchestrator events flow to client until completion or error
+  </Step>
+  <Step title="Automatic Cleanup">
+    Orchestrator is removed from memory when stream closes
+  </Step>
+</Steps>
+
+<Warning>
+Orchestrators are automatically cleaned up when the SSE stream ends. Long-running sessions remain in memory until completion.
+</Warning>
+
+## Monitoring & Logging
+
+The server outputs structured logs for each request:
+
+```bash
+# Log format: [LEVEL] [SESSION_ID] [EVENT] [DETAILS]
+I abc123 req_start model=glm-4.7
+I abc123 req_end dur=2341ms
+```
+
+Control log verbosity with the `LOG_LEVEL` environment variable (see [Environment Variables](/deployment/environment-variables)).
+
+## Health Checks
+
+Implement health checks by querying the `/models` endpoint:
+
+```bash
+curl http://localhost:4000/models
+```
+
+A successful response indicates the server is running and can communicate with configured providers.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server won't start">
+    - Verify Bun is installed: `bun --version`
+    - Check port availability: `lsof -i :4000`
+    - Validate `.env` file exists and has proper permissions
+    - Review console output for specific error messages
+  </Accordion>
+  
+  <Accordion title="API key errors">
+    - Ensure at least one provider API key is set in `.env`
+    - Verify API keys are valid and have proper permissions
+    - Check provider-specific documentation for key requirements
+  </Accordion>
+  
+  <Accordion title="SSE connection issues">
+    - Disable proxy buffering in reverse proxy configuration
+    - Increase proxy timeout settings for long-running requests
+    - Verify client supports EventSource or proper SSE handling
+  </Accordion>
+  
+  <Accordion title="Memory leaks with long sessions">
+    - Verify orchestrators are being cleaned up (check logs)
+    - Monitor memory usage: `bun --inspect server/index.ts`
+    - Consider implementing session timeouts for idle connections
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/deployment/configuration">
+    Learn about advanced configuration options
+  </Card>
+  <Card title="Environment Variables" icon="key" href="/deployment/environment-variables">
+    Complete reference for all environment variables
+  </Card>
+</CardGroup>
