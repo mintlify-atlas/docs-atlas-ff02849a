@@ -14,10 +14,10 @@ The `AgentOrchestrator` manages concurrent agents, multiplexes their event strea
     Instantiate the orchestrator with your harness:
 
     ```typescript
-    import { AgentOrchestrator } from "@/packages/ai/orchestrator";
-    import { createAgentHarness } from "@/packages/ai/harness/agent";
-    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
-    import { bashTool, agentTool } from "@/packages/ai/tools";
+    import { AgentOrchestrator } from "./packages/ai/orchestrator";
+    import { createAgentHarness } from "./packages/ai/harness/agent";
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+    import { bashTool, agentTool } from "./packages/ai/tools";
 
     const orchestrator = new AgentOrchestrator(
       createAgentHarness({ harness: createGeneratorHarness() })
@@ -212,7 +212,7 @@ Permission resolution order:
 Agents can spawn child agents using the `agent` tool:
 
 ```typescript
-import { agentTool, bashTool } from "@/packages/ai/tools";
+import { agentTool, bashTool } from "./packages/ai/tools";
 
 const parentId = orchestrator.spawn({
   model: "glm-4.7",
@@ -241,10 +241,10 @@ user message
 ## Example: Concurrent Task Execution
 
 ```typescript
-import { AgentOrchestrator } from "@/packages/ai/orchestrator";
-import { createAgentHarness } from "@/packages/ai/harness/agent";
-import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
-import { bashTool, readTool, patchTool } from "@/packages/ai/tools";
+import { AgentOrchestrator } from "./packages/ai/orchestrator";
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+import { bashTool, readTool, patchTool } from "./packages/ai/tools";
 
 const orchestrator = new AgentOrchestrator(
   createAgentHarness({ harness: createGeneratorHarness() })
@@ -302,8 +302,8 @@ orchestrator.cleanup();
 ## Example: Delegating to Specialists
 
 ```typescript
-import { AgentOrchestrator } from "@/packages/ai/orchestrator";
-import { agentTool, bashTool, readTool, patchTool } from "@/packages/ai/tools";
+import { AgentOrchestrator } from "./packages/ai/orchestrator";
+import { agentTool, bashTool, readTool, patchTool } from "./packages/ai/tools";
 
 const orchestrator = new AgentOrchestrator();
 
@@ -403,9 +403,7 @@ process.on("SIGINT", () => {
 Enable logging to trace orchestrator internals:
 
 ```typescript
-import { setLogLevel } from "@/packages/ai/logger";
 
-setLogLevel("I"); // Info level
 
 const orchestrator = new AgentOrchestrator();
 

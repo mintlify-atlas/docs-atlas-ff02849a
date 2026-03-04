@@ -49,8 +49,8 @@ This decouples input size from context window size.
     Wrap a provider harness with the RLM harness:
 
     ```typescript
-    import { createRlmHarness } from "@/packages/ai/rlm/harness";
-    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+    import { createRlmHarness } from "./packages/ai/rlm/harness";
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
 
     const rlm = createRlmHarness({
       rootHarness: createGeneratorHarness(),
@@ -157,8 +157,8 @@ FINAL(scope.summaries.join("\n\n"));
 ## Example: Document Summarization
 
 ```typescript
-import { createRlmHarness } from "@/packages/ai/rlm/harness";
-import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+import { createRlmHarness } from "./packages/ai/rlm/harness";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
 
 const rlm = createRlmHarness({
   rootHarness: createGeneratorHarness(),
@@ -402,9 +402,7 @@ If multiple code blocks are present, an `error` event is yielded.
 Enable logging:
 
 ```typescript
-import { setLogLevel } from "@/packages/ai/logger";
 
-setLogLevel("I"); // Info level
 
 for await (const event of rlm.invoke(params)) {
   // Logs appear on stderr:

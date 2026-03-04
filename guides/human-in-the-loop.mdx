@@ -72,9 +72,9 @@ Permission checking follows this flow:
 Simple command-line approval flow:
 
 ```typescript
-import { createAgentHarness } from "@/packages/ai/harness/agent";
-import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
-import { bashTool } from "@/packages/ai/tools";
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+import { bashTool } from "./packages/ai/tools";
 import * as readline from "readline";
 
 const rl = readline.createInterface({
@@ -140,7 +140,7 @@ In a server context, relay resolution happens over HTTP:
 
     ```typescript
     import { Hono } from "hono";
-    import { AgentOrchestrator } from "@/packages/ai/orchestrator";
+    import { AgentOrchestrator } from "./packages/ai/orchestrator";
     import { streamSSE } from "hono/streaming";
 
     const app = new Hono();
@@ -206,7 +206,7 @@ In a server context, relay resolution happens over HTTP:
     The client uses SSE and HTTP transports:
 
     ```typescript
-    import { createSSETransport, createHTTPTransport } from "@/packages/ai/client";
+    import { createSSETransport, createHTTPTransport } from "./packages/ai/client";
 
     const sse = createSSETransport({ baseUrl: "http://localhost:4000" });
     const http = createHTTPTransport({ baseUrl: "http://localhost:4000" });
@@ -268,7 +268,7 @@ Tools define how to generalize a specific call:
 
 ```typescript
 import { z } from "zod";
-import type { ToolDefinition } from "@/packages/ai/types";
+import type { ToolDefinition } from "./packages/ai/types";
 
 const bashTool: ToolDefinition = {
   name: "bash",
@@ -305,8 +305,8 @@ React component with relay approval:
 
 ```typescript
 import { useState, useEffect } from "react";
-import { createSSETransport, createHTTPTransport } from "@/packages/ai/client";
-import type { ServerEvent } from "@/packages/ai/client";
+import { createSSETransport, createHTTPTransport } from "./packages/ai/client";
+import type { ServerEvent } from "./packages/ai/client";
 
 function ChatInterface() {
   const [events, setEvents] = useState<ServerEvent[]>([]);

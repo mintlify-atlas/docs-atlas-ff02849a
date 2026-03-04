@@ -14,9 +14,9 @@ The agent harness wraps any provider harness and adds an agentic loop: it calls 
     Wrap a provider harness with the agent harness:
 
     ```typescript
-    import { createAgentHarness } from "@/packages/ai/harness/agent";
-    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
-    import { bashTool } from "@/packages/ai/tools";
+    import { createAgentHarness } from "./packages/ai/harness/agent";
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
+    import { bashTool } from "./packages/ai/tools";
 
     const agent = createAgentHarness({
       harness: createGeneratorHarness(),
@@ -84,7 +84,7 @@ LLM Gateway provides four core tools:
     Execute shell commands:
 
     ```typescript
-    import { bashTool } from "@/packages/ai/tools";
+    import { bashTool } from "./packages/ai/tools";
 
     for await (const event of agent.invoke({
       model: "glm-4.7",
@@ -106,7 +106,7 @@ LLM Gateway provides four core tools:
     Read files with line numbers:
 
     ```typescript
-    import { readTool } from "@/packages/ai/tools";
+    import { readTool } from "./packages/ai/tools";
 
     for await (const event of agent.invoke({
       model: "glm-4.7",
@@ -125,7 +125,7 @@ LLM Gateway provides four core tools:
     Apply unified diff patches:
 
     ```typescript
-    import { patchTool } from "@/packages/ai/tools";
+    import { patchTool } from "./packages/ai/tools";
 
     for await (const event of agent.invoke({
       model: "glm-4.7",
@@ -146,7 +146,7 @@ LLM Gateway provides four core tools:
     Spawn a subagent:
 
     ```typescript
-    import { agentTool } from "@/packages/ai/tools";
+    import { agentTool } from "./packages/ai/tools";
 
     for await (const event of agent.invoke({
       model: "glm-4.7",
@@ -276,7 +276,7 @@ Define your own tools:
 
 ```typescript
 import { z } from "zod";
-import type { ToolDefinition } from "@/packages/ai/types";
+import type { ToolDefinition } from "./packages/ai/types";
 
 const weatherTool: ToolDefinition = {
   name: "get_weather",
@@ -401,9 +401,7 @@ When the limit is reached, the agent gets one final turn with an empty tool list
 Enable logging to trace the agentic loop:
 
 ```typescript
-import { setLogLevel } from "@/packages/ai/logger";
 
-setLogLevel("I"); // Info level
 
 for await (const event of agent.invoke(params)) {
   // Logs appear on stderr:

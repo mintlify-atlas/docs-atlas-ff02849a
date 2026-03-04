@@ -18,7 +18,7 @@ SSE events → reduceConversation() → ConversationGraph → projections → UI
     Events stream from the server via SSE:
 
     ```typescript
-    import { createSSETransport } from "@/packages/ai/client";
+    import { createSSETransport } from "./packages/ai/client";
 
     const sse = createSSETransport({ baseUrl: "/api" });
 
@@ -38,7 +38,7 @@ SSE events → reduceConversation() → ConversationGraph → projections → UI
     import {
       createInitialConversation,
       reduceConversation,
-    } from "@/packages/ai/client";
+    } from "./packages/ai/client";
 
     let state = createInitialConversation();
 
@@ -53,7 +53,7 @@ SSE events → reduceConversation() → ConversationGraph → projections → UI
     Transform the graph into view-specific formats:
 
     ```typescript
-    import { projectThread } from "@/packages/ai/client";
+    import { projectThread } from "./packages/ai/client";
 
     const view = projectThread(state.graph);
     // view: ViewNode[] — flat list of chat messages with nested branches
@@ -90,7 +90,7 @@ SSE events → reduceConversation() → ConversationGraph → projections → UI
       reduceConversation,
       projectThread,
       type ViewNode,
-    } from "@/packages/ai/client";
+    } from "./packages/ai/client";
 
     const sse = createSSETransport({ baseUrl: "/api" });
     const http = createHTTPTransport({ baseUrl: "/api" });
@@ -195,7 +195,7 @@ SSE events → reduceConversation() → ConversationGraph → projections → UI
       reduceConversation,
       projectThread,
       type ViewNode,
-    } from "@/packages/ai/client";
+    } from "./packages/ai/client";
 
     const sse = createSSETransport({ baseUrl: "/api" });
     const http = createHTTPTransport({ baseUrl: "/api" });
@@ -249,7 +249,7 @@ SSE events → reduceConversation() → ConversationGraph → projections → UI
       reduceConversation,
       projectThread,
       type ViewNode,
-    } from "@/packages/ai/client";
+    } from "./packages/ai/client";
 
     const sse = createSSETransport({ baseUrl: "/api" });
     const http = createHTTPTransport({ baseUrl: "/api" });
@@ -439,7 +439,7 @@ for await (const event of sse.stream(request)) {
 Convert to LLM API format for follow-up requests:
 
 ```typescript
-import { projectMessages } from "@/packages/ai/client";
+import { projectMessages } from "./packages/ai/client";
 
 const messages = projectMessages(state.graph);
 // messages: Message[] — ready for next API call
@@ -457,7 +457,7 @@ for await (const event of sse.stream({ model: "glm-4.7", messages })) {
 Visualize the event graph:
 
 ```typescript
-import { projectDAG } from "@/packages/ai/client/hypergraph/projections/dag";
+import { projectDAG } from "./packages/ai/client/hypergraph/projections/dag";
 
 const dag = projectDAG(state.graph);
 // dag: { nodes: DAGNode[], edges: DAGEdge[], groups: DAGGroup[] }

@@ -14,7 +14,7 @@ LLM Gateway provides streaming LLM calls through provider harnesses. Each harnes
     Select from available providers: `zen` (OpenAI-compatible), `anthropic`, `openai`, or `openrouter`.
 
     ```typescript
-    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
 
     const harness = createGeneratorHarness();
     ```
@@ -83,7 +83,7 @@ Provider harnesses yield these events:
     The Zen provider works with OpenAI-compatible APIs and supports reasoning content:
 
     ```typescript
-    import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+    import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
 
     const harness = createGeneratorHarness({
       apiKey: process.env.ZEN_API_KEY,
@@ -110,7 +110,7 @@ Provider harnesses yield these events:
     Use Claude models directly:
 
     ```typescript
-    import { createAnthropicHarness } from "@/packages/ai/harness/providers/anthropic";
+    import { createAnthropicHarness } from "./packages/ai/harness/providers/anthropic";
 
     const harness = createAnthropicHarness({
       apiKey: process.env.ANTHROPIC_API_KEY,
@@ -129,7 +129,7 @@ Provider harnesses yield these events:
     Access OpenAI models:
 
     ```typescript
-    import { createOpenAIHarness } from "@/packages/ai/harness/providers/openai";
+    import { createOpenAIHarness } from "./packages/ai/harness/providers/openai";
 
     const harness = createOpenAIHarness({
       apiKey: process.env.OPENAI_API_KEY,
@@ -148,7 +148,7 @@ Provider harnesses yield these events:
     Access multiple providers through OpenRouter:
 
     ```typescript
-    import { createOpenRouterHarness } from "@/packages/ai/harness/providers/openrouter";
+    import { createOpenRouterHarness } from "./packages/ai/harness/providers/openrouter";
 
     const harness = createOpenRouterHarness({
       apiKey: process.env.OPENROUTER_API_KEY,
@@ -303,8 +303,8 @@ This becomes important when composing harnesses — each nested call gets its ow
 Provider harnesses compose with other harnesses. See the [Tool Calling](/guides/tool-calling) and [Multi-Agent](/guides/multi-agent) guides for wrapping providers with agentic capabilities.
 
 ```typescript
-import { createAgentHarness } from "@/packages/ai/harness/agent";
-import { createGeneratorHarness } from "@/packages/ai/harness/providers/zen";
+import { createAgentHarness } from "./packages/ai/harness/agent";
+import { createGeneratorHarness } from "./packages/ai/harness/providers/zen";
 
 const provider = createGeneratorHarness();
 const agent = createAgentHarness({ harness: provider });
