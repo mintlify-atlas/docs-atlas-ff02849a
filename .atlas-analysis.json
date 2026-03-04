@@ -1,0 +1,148 @@
+{
+  "projectType": "framework",
+  "projectName": "LLM Gateway",
+  "projectDescription": "An agent framework built on composable async generator harnesses that yield events and form conversation graphs.",
+  "theme": "aspen",
+  "primaryColor": "#4595db",
+  "lightColor": "#5ebf9e",
+  "darkColor": "#0494dc",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/harnesses",
+              "concepts/events",
+              "concepts/composition",
+              "concepts/conversation-graph",
+              "concepts/permissions"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/streaming-llm",
+              "guides/tool-calling",
+              "guides/multi-agent",
+              "guides/human-in-the-loop",
+              "guides/client-rendering",
+              "guides/recursive-language-model"
+            ]
+          },
+          {
+            "group": "Building Extensions",
+            "pages": [
+              "extensions/custom-provider",
+              "extensions/custom-tool",
+              "extensions/custom-harness",
+              "extensions/custom-projection"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/server-setup",
+              "deployment/configuration",
+              "deployment/environment-variables"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Harnesses",
+            "pages": [
+              "api/harnesses/agent",
+              "api/harnesses/zen",
+              "api/harnesses/anthropic",
+              "api/harnesses/openai",
+              "api/harnesses/openrouter",
+              "api/harnesses/rlm"
+            ]
+          },
+          {
+            "group": "Orchestration",
+            "pages": [
+              "api/orchestrator",
+              "api/multiplexer",
+              "api/permissions"
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "api/tools/bash",
+              "api/tools/agent",
+              "api/tools/read",
+              "api/tools/patch"
+            ]
+          },
+          {
+            "group": "Client Library",
+            "pages": [
+              "api/client/conversation",
+              "api/client/graph",
+              "api/client/projections",
+              "api/client/transports"
+            ]
+          },
+          {
+            "group": "Types & Primitives",
+            "pages": [
+              "api/types",
+              "api/primitives"
+            ]
+          },
+          {
+            "group": "HTTP API",
+            "pages": [
+              "api/http/overview",
+              "api/http/chat",
+              "api/http/models",
+              "api/http/relay"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Composable async generator harness architecture",
+    "Multi-agent orchestration with concurrent execution",
+    "Event-driven conversation graph with projections",
+    "Multiple LLM provider support (Zen, Anthropic, OpenAI, OpenRouter)",
+    "Permission system with human-in-the-loop approval",
+    "Built-in tool execution framework",
+    "Recursive Language Model (RLM) for long context processing",
+    "Client-side state management with SSE/HTTP transports",
+    "Server-sent events streaming with session management"
+  ],
+  "publicApiSurface": [
+    "createAgentHarness",
+    "createGeneratorHarness (zen, anthropic, openai, openrouter)",
+    "createRlmHarness",
+    "AgentOrchestrator",
+    "AgentMultiplexer",
+    "bashTool, agentTool, readTool, patchTool",
+    "createInitialConversation, reduceConversation",
+    "projectThread, reduceEvent",
+    "createSSETransport, createHTTPTransport",
+    "createApp (server)",
+    "matchesPermissions",
+    "discoverSkills, formatSkillsPrompt",
+    "Deferred, AsyncQueue, Passthrough"
+  ]
+}
